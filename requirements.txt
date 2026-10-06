@@ -1,0 +1,20 @@
+# Runtime dependencies. Install with the Tsinghua mirror (mainland China):
+#   python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+#
+# Versions are pinned to the exact set this project was developed and tested with.
+# Pinning also matters for speed: with open ranges pip 23 has to fetch metadata for
+# every candidate version of every package, which on the Tsinghua mirror can stall
+# for a very long time.
+#
+# Keep this file ASCII-only: pip reads it with the system locale encoding (GBK on
+# Chinese Windows), so non-ASCII comments can raise UnicodeDecodeError.
+#
+# Notes:
+# - openai 1.x : Ark's official docs and examples use the 1.x chat.completions API
+# - pydantic 2 : the core/web layers use pydantic v2 model_dump()
+openai==1.109.1
+fastapi==0.115.14
+uvicorn==0.34.3
+python-multipart==0.0.20
+pillow==11.3.0
+pydantic==2.11.7

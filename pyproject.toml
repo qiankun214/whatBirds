@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whatbird"
+version = "0.1.0"
+description = "基于火山引擎方舟 Doubao-Seed-2.1 的鸟类识别应用（core / CLI / Web 前后端分离）"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "openai>=1.40.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "python-multipart>=0.0.9",
+    "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "httpx>=0.27.0"]
+
+[project.scripts]
+whatbird = "whatbird.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["whatbird*"]
+
+[tool.setuptools.package-data]
+whatbird = ["web/static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

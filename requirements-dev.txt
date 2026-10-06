@@ -1,0 +1,5 @@
+# Dev/test dependencies. Install with the Tsinghua mirror:
+#   python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements-dev.txt
+-r requirements.txt
+pytest==9.1.1
+httpx==0.28.1
