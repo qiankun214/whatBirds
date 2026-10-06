@@ -64,13 +64,25 @@ WhatBird/
 
 ## 2. 安装
 
-当前处于中国大陆，**pip 统一使用清华镜像**（`Agent.md` 第 2 条）：
+本机已经在仓库内准备好一个虚拟环境 `E:\WhatBird\.venv`（依赖已装齐），直接用它即可：
+
+```bat
+.venv\Scripts\python -m whatbird.cli --help
+```
+
+下文命令里的 `python` 都指**这个虚拟环境的解释器**；若你在自己的终端里操作，先激活它
+（`.venv\Scripts\activate`）或直接写全路径。
+
+要在别的环境里安装，请使用清华镜像（`Agent.md` 第 2 条）：
 
 ```bash
 python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements-dev.txt
 ```
 
-（只想跑起来可以只装 `requirements.txt`。）
+> 两个已踩过的坑：
+> 1. `requirements*.txt` 保持纯 ASCII —— 中文 Windows 上 pip 用 GBK 读取，中文注释会抛 `UnicodeDecodeError`。
+> 2. 如果 pip 长时间卡住不动，加上 `--no-cache-dir`（pip 的 HTTP 缓存目录不可写时会一直空转）。
+
 
 ---
 
