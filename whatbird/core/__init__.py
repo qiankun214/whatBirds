@@ -25,15 +25,19 @@ from .errors import (
     ResponseParseError,
     WhatBirdError,
 )
-from .models import BirdIdentification, SimilarSpecies, Taxonomy
+from .image_input import ImageSource
+from .models import BatchItem, BatchReport, BirdIdentification, SimilarSpecies, Taxonomy
 from .recognizer import BirdRecognizer, identify
 
 __all__ = [
     "ArkConfig",
+    "BatchItem",
+    "BatchReport",
     "BirdIdentification",
     "BirdRecognizer",
     "ConfigError",
     "ImageInputError",
+    "ImageSource",
     "ModelCallError",
     "ResponseParseError",
     "SimilarSpecies",

@@ -17,12 +17,15 @@ import argparse
 import getpass
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
 from .core import (
     ArkConfig,
+    BatchItem,
+    BatchReport,
     BirdIdentification,
     ConfigError,
     WhatBirdError,
@@ -255,13 +258,63 @@ def cmd_config_verify(_: argparse.Namespace) -> int:
 
 def cmd_identify(args: argparse.Namespace) -> int:
     recognizer = BirdRecognizer(load_config())
-    result = recognizer.recognize(args.image)
+    images = list(args.images)
 
-    if args.json:
-        print(json.dumps(result.to_dict(include_raw=args.raw), ensure_ascii=False, indent=2))
+    # ---- 单张：保持原有输出格式完全不变 ----
+    if len(images) == 1:
+        result = recognizer.recognize(images[0])
+        if args.json:
+            print(json.dumps(result.to_dict(include_raw=args.raw), ensure_ascii=False, indent=2))
+        else:
+            print(_render_result(result))
+        return 0
+
+    # ---- 多张：依次识别，边跑边报进度 ----
+    return _run_batch(recognizer, images, as_json=args.json)
+
+
+def _run_batch(recognizer: BirdRecognizer, images: list[str], *, as_json: bool) -> int:
+    report = BatchReport(total=len(images))
+    interrupted = False
+    started = time.perf_counter()
+
+    def on_start(index: int, total: int, name: str) -> None:
+        print(f"[{index}/{total}] 正在识别：{name}", file=sys.stderr, flush=True)
+
+    try:
+        for item in recognizer.iter_batch(images, on_start=on_start):
+            report.items.append(item)
+            if not as_json:
+                print(_render_batch_line(item), flush=True)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n已中止（Ctrl+C）", file=sys.stderr)
+    finally:
+        report.elapsed_seconds = time.perf_counter() - started
+        report.stopped = interrupted or report.completed < report.total
+
+    if as_json:
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
     else:
-        print(_render_result(result))
-    return 0
+        print(
+            f"\n批量结束：共 {report.total} 张，成功 {report.succeeded}，失败 {report.failed}"
+            f"，用时 {report.elapsed_seconds:.1f}s"
+            + ("（已中止）" if report.stopped else "")
+        )
+    return 130 if interrupted else 0
+
+
+def _render_batch_line(item: BatchItem) -> str:
+    """批量模式下一张图一行的进度输出。"""
+    if item.ok and item.identification is not None:
+        result = item.identification
+        name = result.chinese_name or result.scientific_name or "未识别"
+        latin = f"（{result.scientific_name}）" if result.scientific_name and result.chinese_name else ""
+        family = result.taxonomy.family or "-"
+        body = f"{name}{latin}  科：{family}  置信度 {result.confidence:.0%}"
+    else:
+        body = f"失败：{item.error_message}"
+    return f"[{item.index}/{item.total}] {body}  | {item.source}  {item.elapsed_seconds:.1f}s"
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -368,10 +421,17 @@ def build_parser() -> argparse.ArgumentParser:
     config_parser.set_defaults(handler=lambda _: (config_parser.print_help(), 1)[1])
 
     # identify
-    identify_parser = subparsers.add_parser("identify", help="识别一张 jpg 图片中的鸟")
-    identify_parser.add_argument("image", help="jpg / jpeg 文件路径")
+    identify_parser = subparsers.add_parser(
+        "identify",
+        help="识别 jpg 图片中的鸟（可一次给多张，按顺序依次识别）",
+    )
+    identify_parser.add_argument(
+        "images",
+        nargs="+",
+        help="jpg / jpeg 文件路径；给多个则依次识别并显示进度",
+    )
     identify_parser.add_argument("--json", action="store_true", help="以 JSON 输出（便于脚本处理）")
-    identify_parser.add_argument("--raw", action="store_true", help="JSON 输出中包含模型原始返回")
+    identify_parser.add_argument("--raw", action="store_true", help="JSON 输出中包含模型原始返回（仅单张）")
     identify_parser.set_defaults(handler=cmd_identify)
 
     # serve

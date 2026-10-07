@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
-from whatbird.core import ArkConfig, BirdIdentification, ModelCallError
-from whatbird.core.image_input import prepare_image_bytes
+from whatbird.core import (
+    ArkConfig,
+    BatchItem,
+    BirdIdentification,
+    ImageSource,
+    ModelCallError,
+    WhatBirdError,
+)
+from whatbird.core.image_input import prepare_image, prepare_image_bytes
 
 # 用 importlib 明确取子模块，避免包属性与子模块同名的歧义
 web_app = importlib.import_module("whatbird.web.app")
@@ -44,6 +53,8 @@ class FakeRecognizer:
 
     fail_with: "Exception | None" = None
     last_config: "ArkConfig | None" = None
+    #: 批处理时每张的「耗时」，用于测试终止（让任务有足够时间被取消）
+    item_delay: float = 0.0
 
     def __init__(self, config=None, **kwargs):
         self.config = config or ArkConfig(api_key="sk-fake")
@@ -60,8 +71,6 @@ class FakeRecognizer:
         )
 
     def recognize(self, image_path: str) -> BirdIdentification:
-        from whatbird.core.image_input import prepare_image
-
         prepare_image(image_path)  # 复用真实校验逻辑
         return self._build(image_path)
 
@@ -73,14 +82,65 @@ class FakeRecognizer:
         self._raise_if_failing()
         return "正常"
 
+    # ---- 批量（异步）：驱动 Web 层的任务管理 ----
+    async def aiter_batch(self, sources, *, on_start=None, **kwargs):
+        items = [ImageSource.coerce(source) for source in sources]
+        total = len(items)
+        for index, source in enumerate(items, start=1):
+            if on_start is not None:
+                on_start(index, total, source.name)
+            if type(self).item_delay:
+                await asyncio.sleep(type(self).item_delay)
+            started = time.perf_counter()
+            try:
+                if source.path is not None:
+                    prepare_image(source.path)
+                else:
+                    prepare_image_bytes(source.data or b"", source=source.name)
+                self._raise_if_failing()
+            except WhatBirdError as exc:
+                yield BatchItem(
+                    index=index,
+                    total=total,
+                    source=source.name,
+                    status="error",
+                    error_message=exc.message,
+                    error_hint=exc.hint,
+                    elapsed_seconds=time.perf_counter() - started,
+                )
+                continue
+            yield BatchItem(
+                index=index,
+                total=total,
+                source=source.name,
+                status="ok",
+                identification=BirdIdentification.from_model_output(
+                    FAKE_RESULT, source_image=source.name, model="fake-model", elapsed_seconds=0.01
+                ),
+                elapsed_seconds=time.perf_counter() - started,
+            )
+
 
 @pytest.fixture
 def client(monkeypatch):
     FakeRecognizer.fail_with = None
     FakeRecognizer.last_config = None
+    FakeRecognizer.item_delay = 0.0
     monkeypatch.setattr(web_app, "BirdRecognizer", FakeRecognizer)
     with TestClient(web_app.app) as test_client:
         yield test_client
+
+
+def _wait_for_terminal(client, job_id: str, timeout: float = 5.0) -> dict:
+    """轮询任务直到进入终态（或超时）。"""
+    deadline = time.time() + timeout
+    snapshot = {}
+    while time.time() < deadline:
+        snapshot = client.get(f"/api/batch/{job_id}").json()
+        if snapshot["status"] in {"done", "stopped", "failed"}:
+            return snapshot
+        time.sleep(0.02)
+    raise AssertionError(f"任务未在 {timeout}s 内结束：{snapshot}")
 
 
 # ------------------------------------------------------------------ 系统
@@ -305,6 +365,149 @@ def test_model_failure_maps_to_502(client, jpeg_factory):
     response = client.post("/api/recognize-path", json={"path": str(jpeg_factory())}, headers=HEADERS)
     assert response.status_code == 502
     assert response.json()["error"]["hint"] == "稍后重试"
+
+
+# ------------------------------------------------------------------ 批量识别
+def test_batch_paths_runs_to_completion(client, jpeg_factory):
+    files = [jpeg_factory(f"b{i}.jpg") for i in range(3)]
+
+    start = client.post(
+        "/api/batch/start-paths",
+        json={"paths": [str(path) for path in files]},
+        headers=HEADERS,
+    )
+    assert start.status_code == 200
+    job_id = start.json()["job_id"]
+    assert start.json()["total"] == 3
+
+    snapshot = _wait_for_terminal(client, job_id)
+
+    assert snapshot["status"] == "done"
+    assert snapshot["completed"] == 3
+    assert snapshot["succeeded"] == 3
+    assert snapshot["failed"] == 0
+    assert [item["index"] for item in snapshot["items"]] == [1, 2, 3]
+    assert snapshot["items"][0]["result"]["names"]["chinese"] == "普通翠鸟"
+    assert snapshot["items"][0]["source"] == "b0.jpg"
+
+
+def test_batch_upload_multiple_files(client, jpeg_factory):
+    files = [
+        ("files", (f"up{i}.jpg", jpeg_factory(f"up{i}.jpg").read_bytes(), "image/jpeg"))
+        for i in range(2)
+    ]
+
+    start = client.post("/api/batch/start-upload", files=files, headers=HEADERS)
+    assert start.status_code == 200
+    snapshot = _wait_for_terminal(client, start.json()["job_id"])
+
+    assert snapshot["status"] == "done"
+    assert snapshot["succeeded"] == 2
+    assert snapshot["items"][1]["source"] == "up1.jpg"
+
+
+def test_batch_keeps_going_when_one_image_fails(client, jpeg_factory):
+    good = str(jpeg_factory("ok.jpg"))
+
+    start = client.post(
+        "/api/batch/start-paths",
+        json={"paths": [good, "E:/definitely/not/here.jpg", good]},
+        headers=HEADERS,
+    )
+    snapshot = _wait_for_terminal(client, start.json()["job_id"])
+
+    assert snapshot["status"] == "done"          # 单张失败不终止整批
+    assert snapshot["succeeded"] == 2
+    assert snapshot["failed"] == 1
+    assert snapshot["items"][1]["status"] == "error"
+    assert snapshot["items"][1]["error"]["message"]
+    assert snapshot["items"][2]["status"] == "ok"
+
+
+def test_batch_stop_terminates_running_job(client, jpeg_factory):
+    FakeRecognizer.item_delay = 0.2
+    try:
+        files = [jpeg_factory(f"s{i}.jpg") for i in range(6)]
+        start = client.post(
+            "/api/batch/start-paths",
+            json={"paths": [str(path) for path in files]},
+            headers=HEADERS,
+        )
+        job_id = start.json()["job_id"]
+
+        stop = client.post(f"/api/batch/{job_id}/stop", headers=HEADERS)
+        assert stop.status_code == 200
+        assert stop.json()["stopped"] is True
+
+        snapshot = _wait_for_terminal(client, job_id)
+        assert snapshot["status"] == "stopped"
+        assert snapshot["stopped"] is True      # 前端汇总要靠它标记「已终止」
+        assert snapshot["completed"] < 6
+    finally:
+        FakeRecognizer.item_delay = 0.0
+
+
+def test_batch_reports_progress_fields(client, jpeg_factory):
+    """进度条需要的字段：当前第几张、当前文件名、总数、已完成数。"""
+    FakeRecognizer.item_delay = 0.2
+    try:
+        files = [jpeg_factory(f"p{i}.jpg") for i in range(4)]
+        start = client.post(
+            "/api/batch/start-paths",
+            json={"paths": [str(path) for path in files]},
+            headers=HEADERS,
+        )
+        job_id = start.json()["job_id"]
+
+        snapshot = client.get(f"/api/batch/{job_id}").json()
+        assert snapshot["total"] == 4
+        assert snapshot["current_index"] >= 1
+        assert snapshot["current_source"]
+        assert set(snapshot) >= {"job_id", "status", "stopped", "total", "completed",
+                                 "succeeded", "failed", "current_index", "current_source",
+                                 "elapsed_seconds", "items"}
+        _wait_for_terminal(client, job_id)
+    finally:
+        FakeRecognizer.item_delay = 0.0
+
+
+def test_stop_on_finished_job_is_graceful(client, jpeg_factory):
+    path = str(jpeg_factory("one.jpg"))
+    start = client.post("/api/batch/start-paths", json={"paths": [path]}, headers=HEADERS)
+    job_id = start.json()["job_id"]
+    _wait_for_terminal(client, job_id)
+
+    stop = client.post(f"/api/batch/{job_id}/stop", headers=HEADERS)
+    assert stop.status_code == 200
+    assert stop.json()["stopped"] is False
+
+
+def test_batch_requires_client_header(client, jpeg_factory):
+    response = client.post(
+        "/api/batch/start-paths",
+        json={"paths": [str(jpeg_factory("h.jpg"))]},
+    )
+    assert response.status_code == 403
+
+
+def test_batch_rejects_empty_paths(client):
+    response = client.post("/api/batch/start-paths", json={"paths": []}, headers=HEADERS)
+    assert response.status_code == 400
+    assert "至少" in response.json()["detail"]
+
+
+def test_batch_rejects_too_many_images(client):
+    paths = [f"E:/photos/{i}.jpg" for i in range(web_app.MAX_BATCH_IMAGES + 1)]
+
+    response = client.post("/api/batch/start-paths", json={"paths": paths}, headers=HEADERS)
+
+    assert response.status_code == 400
+    assert str(web_app.MAX_BATCH_IMAGES) in response.json()["detail"]
+
+
+def test_batch_unknown_job_returns_404(client):
+    assert client.get("/api/batch/nope").status_code == 404
+    assert client.post("/api/batch/nope/stop", headers=HEADERS).status_code == 404
 
 
 # ------------------------------------------------------------------ 静态前端

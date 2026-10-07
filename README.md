@@ -1,7 +1,10 @@
 # WhatBird 🪶
 
-基于 **火山引擎方舟 Doubao-Seed-2.1** 的鸟类识别应用：给它一张 jpg 图片，返回鸟的中文名、英文名、
+基于 **火山引擎方舟 Doubao-Seed-2.1** 的鸟类识别应用：给一张（或一批）jpg 图片，返回鸟的中文名、英文名、
 拉丁学名，以及**界 / 门 / 纲 / 目 / 科 / 属 / 种**等完整分类学信息。
+
+支持**批量识别**：一次选择多张图片依次识别，界面显示进度（当前第几张 / 共几张）并给出**终止**按钮，
+结果以表格列出，可点击查看单张详情、导出 JSON。
 
 项目约定见 [`Agent.md`](Agent.md)（固定载入内容）：Python 工作语言、pip 用清华镜像、
 前后端分离、git 版本管理、API 配置隔离且不入库。
@@ -57,6 +60,7 @@ WhatBird/
 │   ├── cli.py                   # CLI 前端
 │   └── web/
 │       ├── app.py               # FastAPI REST 层
+│       ├── jobs.py              # 批量识别任务（进度 / 终止）
 │       └── static/              # 原生 HTML/CSS/JS 前端
 └── tests/                       # pytest（core / api / 前端契约）
 ```
@@ -232,6 +236,14 @@ python -m whatbird.cli identify D:\photos\bird.jpg --json
 python -m whatbird.cli identify D:\photos\bird.jpg --json --raw   # 附带模型原始返回
 ```
 
+一次给多张（**批量**）：按顺序依次识别，边跑边打印每张的结果与进度，`Ctrl+C` 可中止；
+批量模式下 `--json` 输出整批的汇总报告。
+
+```bash
+python -m whatbird.cli identify D:\photos\a.jpg D:\photos\b.jpg D:\photos\c.jpg
+python -m whatbird.cli identify D:\photos\*.jpg --json > batch.json
+```
+
 ---
 
 ## 5. 使用方式二：Web 界面（UI -> core）
@@ -244,10 +256,15 @@ python -m whatbird.cli serve --port 8000
 
 - 首次进入自动弹出**配置向导**（四步：获取 Key → 接入信息 → 高级参数 → 测试并保存）；
 - 之后点右上角「API 配置」可随时回到向导修改，已保存的 Key 不会明文下发到浏览器；
-- 提供图片有两种方式：**上传图片** 或 **填写服务器上的 jpg 路径**；
-- 结果区展示中文名、学名、置信度、界门纲目科属种、识别依据、相似物种等。
+- 提供图片有两种方式：**上传图片**（可多选）或 **填写服务器上的 jpg 路径**（一行一个，可填多个）；
+- **批量识别**：按顺序逐张识别，识别过程中显示进度条、「正在识别第 x / y 张：文件名」与已用时间，
+  随时可以点**终止识别**；已完成的图片会保留，未开始的不会再发出请求；
+- 结果区：单张显示完整详情；多张显示结果表（文件名 / 识别结果 / 科 / 属 / 置信度 / 状态），
+  点击任意一行查看该张的完整分类学信息，并可「导出 JSON」。
 
-![配置向导第四步：测试并保存](docs/screenshots/config-wizard-step4.png)
+![识别过程：进度与终止](docs/screenshots/batch-progress.png)
+
+![批量结果：结果表 + 单张详情](docs/screenshots/batch-results.png)
 
 ### REST 接口
 
@@ -257,9 +274,17 @@ python -m whatbird.cli serve --port 8000
 | GET | `/api/config` | 读取配置（Key 脱敏）+ 参数默认值 + 位置与可写性 |
 | PUT | `/api/config` | 写入配置 |
 | POST | `/api/config/verify` | 测试连接；请求体可带「草稿」参数，**只测不存** |
-| POST | `/api/recognize` | 上传图片识别（multipart） |
-| POST | `/api/recognize-path` | 传入服务器 jpg 路径识别 |
+| POST | `/api/recognize` | 上传图片识别（multipart，单张） |
+| POST | `/api/recognize-path` | 传入服务器 jpg 路径识别（单张） |
+| POST | `/api/batch/start-upload` | 批量：上传多张图片，立即返回任务号 |
+| POST | `/api/batch/start-paths` | 批量：传入多个服务器路径，立即返回任务号 |
+| GET | `/api/batch/{job_id}` | 批量：查询进度（当前第几张、已完成结果） |
+| POST | `/api/batch/{job_id}/stop` | 批量：终止任务 |
 | GET | `/docs` | 自动生成的 OpenAPI 文档 |
+
+> 批量识别走「启动任务 → 轮询进度 → 可终止」的模式：终止会取消正在等待的上游请求，
+> 未开始的图片根本不会发出，避免白花额度。单张识别在界面上走的是同一套流程，
+> 所以单张也能看到进度并随时终止；`/api/recognize*` 这两个单张接口保持不变，供脚本直接调用。
 
 > 会改动状态或消耗额度的接口都要求请求头 `X-WhatBird-Client: 1`。
 > 浏览器跨站请求无法自定义该请求头（会触发 CORS 预检被拦下），可防止恶意网页偷偷调用本机服务。

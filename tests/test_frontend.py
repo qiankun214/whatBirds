@@ -97,7 +97,8 @@ def test_elements_toggled_by_hidden_are_covered_by_the_global_guard():
 
 # ------------------------------------------------------------------ 接口契约
 def js_api_paths() -> set[str]:
-    return set(re.findall(r'api\(\s*"(/api/[^"]+)"', JS))
+    """取出前端源码里出现的所有 /api/ 字面量（含动态拼接的前缀如 /api/batch/）。"""
+    return set(re.findall(r'"(/api/[^"]*)"', JS))
 
 
 def test_frontend_only_calls_existing_endpoints():
@@ -108,17 +109,48 @@ def test_frontend_only_calls_existing_endpoints():
     used = js_api_paths()
     assert used, "没有解析到前端调用的接口，正则可能失效了"
 
-    missing = sorted(path for path in used if path not in registered)
+    def matches(path: str) -> bool:
+        if path in registered:
+            return True
+        # 动态拼接的前缀，例如 api("/api/batch/" + jobId) 会解析成 "/api/batch/"
+        return path.endswith("/") and any(item.startswith(path) for item in registered)
+
+    missing = sorted(path for path in used if not matches(path))
     assert not missing, f"前端调用了不存在的接口：{missing}（已注册：{sorted(registered)}）"
 
 
-def test_wizard_flows_are_wired_to_endpoints():
-    """配置向导的四个动作必须都接了对应接口。"""
+def test_frontend_flows_are_wired_to_endpoints():
+    """页面的三条主流程都必须接上真实接口。"""
     used = js_api_paths()
-    assert "/api/config" in used          # 读取 + 保存
-    assert "/api/config/verify" in used   # 测试连接
-    assert "/api/recognize" in used       # 上传识别
-    assert "/api/recognize-path" in used  # 路径识别
+    assert "/api/config" in used              # 读取 + 保存配置
+    assert "/api/config/verify" in used       # 测试连接
+    assert "/api/batch/start-upload" in used  # 上传识别（单张与批量共用）
+    assert "/api/batch/start-paths" in used   # 路径识别（单张与批量共用）
+    assert "/api/batch/" in used              # 轮询进度、终止任务
+
+
+def test_batch_and_progress_ui_markup_exists():
+    """批量识别所需的界面元素：多选、进度条、当前第几张、终止按钮、结果表。"""
+    for marker in (
+        'id="file-list"',
+        'id="loading-bar"',
+        'id="loading-progress"',
+        'id="loading-elapsed"',
+        'id="loading-stats"',
+        'id="btn-stop"',
+        'id="batch-panel"',
+        'id="batch-rows"',
+        'id="batch-summary-text"',
+        'id="btn-export"',
+        'id="path-input"',
+        'multiple',
+    ):
+        assert marker in HTML, marker
+
+
+def test_css_styles_progress_and_batch_table():
+    for selector in (".progress", ".loading-card", ".batch-table", ".row-error", ".file-list"):
+        assert selector in CSS, selector
 
 
 def test_client_header_is_sent_with_every_request():

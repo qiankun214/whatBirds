@@ -222,3 +222,74 @@ class BirdIdentification:
         name = self.chinese_name or self.scientific_name or "未识别"
         extra = f"（{self.scientific_name}）" if self.scientific_name and self.chinese_name else ""
         return f"{name}{extra}  置信度 {self.confidence:.0%}"
+
+
+# --------------------------------------------------------------------- 批处理
+@dataclass(slots=True)
+class BatchItem:
+    """批处理里的一张图的识别结果（成功或失败）。"""
+
+    index: int  # 从 1 开始
+    total: int
+    source: str
+    status: str  # ok / error
+    identification: BirdIdentification | None = None
+    error_message: str = ""
+    error_hint: str = ""
+    elapsed_seconds: float = 0.0
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+    def display_name(self) -> str:
+        if self.identification is None:
+            return "—"
+        return self.identification.chinese_name or self.identification.scientific_name or "未识别"
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "index": self.index,
+            "total": self.total,
+            "source": self.source,
+            "status": self.status,
+            "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "result": self.identification.to_dict() if self.identification else None,
+            "error": None,
+        }
+        if self.error_message:
+            payload["error"] = {"message": self.error_message, "hint": self.error_hint}
+        return payload
+
+
+@dataclass(slots=True)
+class BatchReport:
+    """一次批处理的整体结果（CLI 与 Web 共用同一份结构）。"""
+
+    total: int
+    items: list[BatchItem] = field(default_factory=list)
+    stopped: bool = False
+    elapsed_seconds: float = 0.0
+
+    @property
+    def completed(self) -> int:
+        return len(self.items)
+
+    @property
+    def succeeded(self) -> int:
+        return sum(1 for item in self.items if item.ok)
+
+    @property
+    def failed(self) -> int:
+        return self.completed - self.succeeded
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "total": self.total,
+            "completed": self.completed,
+            "succeeded": self.succeeded,
+            "failed": self.failed,
+            "stopped": self.stopped,
+            "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "items": [item.to_dict() for item in self.items],
+        }

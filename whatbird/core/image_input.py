@@ -156,3 +156,60 @@ def _to_rgb(image: Image.Image) -> Image.Image:
         canvas.paste(rgba, mask=rgba.split()[-1])
         return canvas
     return image.convert("RGB")
+
+
+@dataclass(slots=True)
+class ImageSource:
+    """一张待识别图片：既可以是本地文件路径，也可以是内存中的字节（Web 上传）。
+
+    批处理要同时支持「服务器上的多个路径」和「浏览器上传的多个文件」，
+    用这个类型把两者统一起来，core 层就不必区分来源。
+    """
+
+    name: str
+    path: str | None = None
+    data: bytes | None = None
+
+    @classmethod
+    def from_path(cls, path: str | Path) -> "ImageSource":
+        text = str(path)
+        return cls(name=Path(text).name or text, path=text)
+
+    @classmethod
+    def from_bytes(cls, name: str, data: bytes) -> "ImageSource":
+        return cls(name=name, data=data)
+
+    @classmethod
+    def coerce(cls, value: "ImageSource | str | Path | bytes | tuple[str, bytes]") -> "ImageSource":
+        """把各种写法统一成 :class:`ImageSource`（方便 CLI 直接传路径字符串）。"""
+        if isinstance(value, ImageSource):
+            return value
+        if isinstance(value, (bytes, bytearray)):
+            return cls.from_bytes("<bytes>", bytes(value))
+        if isinstance(value, tuple) and len(value) == 2:
+            name, payload = value
+            return cls.from_bytes(str(name), bytes(payload))
+        return cls.from_path(value)
+
+    def prepare(
+        self,
+        *,
+        max_image_side: int = DEFAULT_MAX_SIDE,
+        quality: int = DEFAULT_QUALITY,
+    ) -> PreparedImage:
+        """校验并编码成可直接投喂模型的 data URL。"""
+        if self.path is not None:
+            return prepare_image(self.path, max_image_side=max_image_side, quality=quality)
+        return prepare_image_bytes(
+            self.data or b"",
+            source=self.name,
+            max_image_side=max_image_side,
+            quality=quality,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "path": self.path,
+            "byte_size": len(self.data) if self.data is not None else None,
+        }

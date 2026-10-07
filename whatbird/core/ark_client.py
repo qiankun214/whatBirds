@@ -5,6 +5,11 @@
 - openai SDK 自带超时、重试与异常体系，省掉手写 HTTP 的样板代码；
 - 未来若更换模型供应商，只要改 base_url / model 即可。
 
+同时提供**同步**与**异步**两套调用：
+- 同步（``complete_with_image``）给 CLI 与单图接口用，简单直接；
+- 异步（``acomplete_with_image``）给批处理任务用，可以被 ``asyncio`` 取消 ——
+  这是「终止识别」能真正中断上游请求的关键：任务被取消时 httpx 会关掉连接。
+
 本模块是 core 层里唯一与外部服务通信的地方，方便替换与测试。
 """
 
@@ -20,30 +25,78 @@ PING_SYSTEM_PROMPT = "你是一个连通性自检助手，只需按要求回答�
 PING_USER_PROMPT = "请只回复两个字：正常"
 
 
+# --------------------------------------------------------------------- 消息构造
+def build_image_messages(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    image_data_url: str,
+) -> list[dict[str, Any]]:
+    """构造「一张图片 + 提示词」的对话消息（同步/异步共用）。"""
+    return [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+                {"type": "text", "text": user_prompt},
+            ],
+        },
+    ]
+
+
+def build_text_messages(*, system_prompt: str, user_prompt: str) -> list[dict[str, Any]]:
+    """构造纯文本对话消息（用于连通性自检）。"""
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
 class ArkVisionClient:
-    """封装方舟的「图片 + 文本 -> 文本」调用。"""
+    """封装方舟的「图片 + 文本 -> 文本」调用（同步 + 异步）。"""
 
     def __init__(self, config: ArkConfig) -> None:
         config.validate()
         self.config = config
-        self._client = self._build_client()
+        self._sync_client: Any = None
+        self._async_client: Any = None
 
     # ------------------------------------------------------------- 内部构造
-    def _build_client(self) -> Any:
+    @staticmethod
+    def _import_openai() -> Any:
         try:
-            from openai import OpenAI
+            import openai
         except ImportError as exc:  # pragma: no cover - 依赖缺失时的友好提示
             raise ConfigError(
                 "缺少依赖 openai，无法调用方舟接口",
                 hint="请执行：python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple openai",
             ) from exc
+        return openai
 
-        return OpenAI(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            timeout=self.config.timeout,
-            max_retries=2,
-        )
+    @property
+    def sync_client(self) -> Any:
+        if self._sync_client is None:
+            openai = self._import_openai()
+            self._sync_client = openai.OpenAI(
+                api_key=self.config.api_key,
+                base_url=self.config.base_url,
+                timeout=self.config.timeout,
+                max_retries=2,
+            )
+        return self._sync_client
+
+    @property
+    def async_client(self) -> Any:
+        if self._async_client is None:
+            openai = self._import_openai()
+            self._async_client = openai.AsyncOpenAI(
+                api_key=self.config.api_key,
+                base_url=self.config.base_url,
+                timeout=self.config.timeout,
+                max_retries=2,
+            )
+        return self._async_client
 
     # ------------------------------------------------------------- 对外能力
     def complete_with_image(
@@ -53,41 +106,54 @@ class ArkVisionClient:
         user_prompt: str,
         image_data_url: str,
     ) -> str:
-        """把一张图片（base64 data URL）连同提示词发给模型，返回文本回答。"""
-        if not image_data_url.startswith("data:"):
-            raise ModelCallError(
-                "图片需要以 base64 data URL 传入",
-                hint="请使用 core.image_input.prepare_image() 生成图片输入",
-            )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                    {"type": "text", "text": user_prompt},
-                ],
-            },
-        ]
+        """同步：把一张图片（base64 data URL）连同提示词发给模型，返回文本回答。"""
+        _ensure_data_url(image_data_url)
+        messages = build_image_messages(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_data_url=image_data_url,
+        )
         return self._chat(messages)
 
+    async def acomplete_with_image(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        image_data_url: str,
+    ) -> str:
+        """异步：同上，但可以被取消（批处理任务靠它实现「终止」）。"""
+        _ensure_data_url(image_data_url)
+        messages = build_image_messages(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_data_url=image_data_url,
+        )
+        return await self._achat(messages)
+
     def complete_text(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 32) -> str:
-        """纯文本调用（用于配置连通性自检）。"""
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-        return self._chat(messages, max_tokens=max_tokens)
+        """同步纯文本调用（用于配置连通性自检）。"""
+        return self._chat(build_text_messages(system_prompt=system_prompt, user_prompt=user_prompt), max_tokens=max_tokens)
+
+    async def acomplete_text(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 32) -> str:
+        """异步纯文本调用。"""
+        return await self._achat(
+            build_text_messages(system_prompt=system_prompt, user_prompt=user_prompt),
+            max_tokens=max_tokens,
+        )
 
     def ping(self) -> str:
         """用一次极小的请求验证 api_key / base_url / model 是否可用。"""
         return self.complete_text(system_prompt=PING_SYSTEM_PROMPT, user_prompt=PING_USER_PROMPT)
 
+    async def aping(self) -> str:
+        """异步版连通性自检。"""
+        return await self.acomplete_text(system_prompt=PING_SYSTEM_PROMPT, user_prompt=PING_USER_PROMPT)
+
     # ------------------------------------------------------------- 统一调用
     def _chat(self, messages: list[dict[str, Any]], *, max_tokens: int | None = None) -> str:
         try:
-            response = self._client.chat.completions.create(
+            response = self.sync_client.chat.completions.create(
                 model=self.config.model,
                 messages=messages,
                 max_tokens=max_tokens or self.config.max_tokens,
@@ -97,6 +163,28 @@ class ArkVisionClient:
             raise _translate_error(exc, model=self.config.model) from exc
 
         return _extract_text(response)
+
+    async def _achat(self, messages: list[dict[str, Any]], *, max_tokens: int | None = None) -> str:
+        try:
+            response = await self.async_client.chat.completions.create(
+                model=self.config.model,
+                messages=messages,
+                max_tokens=max_tokens or self.config.max_tokens,
+                temperature=self.config.temperature,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # 注意：asyncio.CancelledError 不是 Exception 的子类，会自然向外传播 —— 这正是取消要的
+            raise _translate_error(exc, model=self.config.model) from exc
+
+        return _extract_text(response)
+
+
+def _ensure_data_url(image_data_url: str) -> None:
+    if not image_data_url.startswith("data:"):
+        raise ModelCallError(
+            "图片需要以 base64 data URL 传入",
+            hint="请使用 core.image_input.prepare_image() 生成图片输入",
+        )
 
 
 def _extract_text(response: Any) -> str:

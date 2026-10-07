@@ -9,8 +9,12 @@ GET                          /api/health          健康检查
 GET                          /api/config          读取配置（API Key 已脱敏）+ 默认值 + 文件位置
 PUT                          /api/config          写入配置（持久化到用户目录）
 POST                         /api/config/verify   验证配置能否调通方舟（可带「草稿」参数先测后存）
-POST                         /api/recognize       上传图片文件识别（multipart）
+POST                         /api/recognize       上传单张图片识别（multipart）
 POST                         /api/recognize-path  传入服务器上的 jpg 路径识别
+POST                         /api/batch/start-upload  批量：上传多张图片，返回任务号
+POST                         /api/batch/start-paths   批量：传入多个服务器路径，返回任务号
+GET                          /api/batch/{job_id}      批量：查询进度与已完成的结果
+POST                         /api/batch/{job_id}/stop 批量：终止任务
 GET                          /                    静态前端页面（含配置向导）
 ===========================  ======  =================================================
 
@@ -25,7 +29,7 @@ GET                          /                    静态前端页面（含配置
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
@@ -37,6 +41,7 @@ from ..core import (
     BirdRecognizer,
     ConfigError,
     ImageInputError,
+    ImageSource,
     ModelCallError,
     ResponseParseError,
     WhatBirdError,
@@ -45,9 +50,13 @@ from ..core import (
     save_config,
 )
 from ..core.config import ArkConfig, mask_secret
+from .jobs import BatchJobManager
 
 #: 上传大小上限：20 MB（远超模型需要，纯粹防误操作）
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+
+#: 一次批处理最多多少张（防止一次点错把额度跑光）
+MAX_BATCH_IMAGES = 50
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -87,6 +96,12 @@ class PathRecognizeRequest(BaseModel):
     """按服务器本地路径识别。"""
 
     path: str = Field(description="服务器上可访问的 jpg / jpeg 文件路径")
+
+
+class BatchPathsRequest(BaseModel):
+    """批量：按服务器本地路径列表依次识别。"""
+
+    paths: List[str] = Field(description="服务器上可访问的 jpg / jpeg 路径列表，按顺序识别")
 
 
 def require_client_header(x_whatbird_client: Optional[str] = Header(default=None)) -> None:
@@ -252,6 +267,78 @@ def create_app() -> FastAPI:
         recognizer = BirdRecognizer(load_config())
         result = recognizer.recognize(payload.path)
         return {"result": result.to_dict()}
+
+    # ----------------------------------------------------------- 批量识别
+    jobs = BatchJobManager()
+
+    @app.post(
+        "/api/batch/start-upload",
+        tags=["batch"],
+        dependencies=[Depends(require_client_header)],
+    )
+    async def start_batch_upload(files: List[UploadFile] = File(...)) -> dict[str, Any]:
+        """批量：上传多张图片，立即返回任务号，识别在后台依次进行。"""
+        if not files:
+            raise HTTPException(status_code=400, detail="请至少选择一张 jpg 图片")
+        if len(files) > MAX_BATCH_IMAGES:
+            raise HTTPException(status_code=400, detail=f"一次最多 {MAX_BATCH_IMAGES} 张图片")
+
+        sources: list[ImageSource] = []
+        for upload in files:
+            data = await upload.read()
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"图片过大（{len(data) / 1024 / 1024:.1f} MB）：{upload.filename}",
+                )
+            sources.append(ImageSource.from_bytes(upload.filename or "<upload>", data))
+
+        job = jobs.start(BirdRecognizer(load_config()), sources)
+        return {"job_id": job.id, "total": job.total, "status": job.status}
+
+    @app.post(
+        "/api/batch/start-paths",
+        tags=["batch"],
+        dependencies=[Depends(require_client_header)],
+    )
+    async def start_batch_paths(payload: BatchPathsRequest) -> dict[str, Any]:
+        """批量：传入服务器上的多个路径，立即返回任务号。"""
+        paths = [item.strip() for item in payload.paths if item and item.strip()]
+        if not paths:
+            raise HTTPException(status_code=400, detail="请至少提供一个 jpg 文件路径")
+        if len(paths) > MAX_BATCH_IMAGES:
+            raise HTTPException(status_code=400, detail=f"一次最多 {MAX_BATCH_IMAGES} 张图片")
+
+        sources = [ImageSource.from_path(path) for path in paths]
+        job = jobs.start(BirdRecognizer(load_config()), sources)
+        return {"job_id": job.id, "total": job.total, "status": job.status}
+
+    @app.get("/api/batch/{job_id}", tags=["batch"])
+    async def batch_status(job_id: str) -> dict[str, Any]:
+        """批量：查询进度与已完成的结果（前端轮询这个接口）。"""
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="任务不存在或已过期")
+        return job.to_dict()
+
+    @app.post(
+        "/api/batch/{job_id}/stop",
+        tags=["batch"],
+        dependencies=[Depends(require_client_header)],
+    )
+    async def batch_stop(job_id: str) -> dict[str, Any]:
+        """批量：终止任务。正在等待的上游请求会被中断，未开始的图片不会发出。"""
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="任务不存在或已过期")
+
+        stopped = jobs.stop(job)
+        return {
+            "job_id": job.id,
+            "stopped": stopped,
+            "status": job.status,
+            "message": "已发送终止请求" if stopped else "该任务已经结束",
+        }
 
     # ----------------------------------------------------------- 静态前端
     if STATIC_DIR.is_dir():
