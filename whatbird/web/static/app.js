@@ -26,6 +26,7 @@
     maskedKey: "",
     configFile: "",
     configFileExists: false,
+    loadedFrom: null,
     configWritable: true,
     location: null,
     config: null,
@@ -94,6 +95,7 @@
       state.config = config;
       state.configFile = data.config_file || "";
       state.configFileExists = !!data.config_file_exists;
+      state.loadedFrom = data.config_loaded_from || null;
       state.configWritable = data.config_writable !== false;
       state.location = data.config_location || null;
       state.defaults = data.defaults || null;
@@ -214,6 +216,10 @@
 
   function renderLocationWarning() {
     var box = $("wz-location-warning");
+    var migrated = state.loadedFrom && state.loadedFrom !== state.configFile
+      ? "\n现有配置读取自 " + state.loadedFrom + "；下次保存会写入上面的新位置。"
+      : "";
+
     if (!state.configWritable) {
       setMessage(
         box,
@@ -226,11 +232,24 @@
       );
       return;
     }
-    if (state.location && state.location.warning) {
-      setMessage(box, state.location.warning, "warn");
+
+    if (state.location && state.location.is_fallback) {
+      var reason = state.location.preferred_error
+        ? "\n首选位置 " + state.location.preferred_path + " 写入被系统拒绝：" + state.location.preferred_error
+        : "";
+      setMessage(
+        box,
+        "当前使用：" + state.location.label + "\n" +
+        (state.location.warning || "") + reason + migrated +
+        "\n若想让密钥完全放在项目之外，请在普通终端里运行 whatbird serve" +
+        "（每次启动都会重新检测，可写时会自动切回用户目录），" +
+        "或用环境变量指定位置：set WHATBIRD_CONFIG_FILE=D:\\whatbird\\config.json",
+        "warn"
+      );
       return;
     }
-    setMessage(box, "");
+
+    setMessage(box, migrated ? migrated.replace(/^\n/, "") : "");
   }
 
   function validateIdentity() {
@@ -287,8 +306,30 @@
   function setBusy(busy) {
     $("wz-verify").disabled = busy;
     $("wz-save").disabled = busy;
+    $("wz-recheck").disabled = busy;
     $("wz-next").disabled = busy;
     $("wz-prev").disabled = busy;
+  }
+
+  async function recheckLocation() {
+    setBusy(true);
+    setMessage($("wz-result"), "正在重新检测配置位置…");
+    try {
+      await loadConfig();
+      renderSummary();
+      renderLocationWarning();
+      setMessage(
+        $("wz-result"),
+        "已重新检测：" + (state.configFile || "-") + "\n位置：" +
+        (state.location ? state.location.label : "-") +
+        (state.configWritable ? "（可写）" : "（不可写）"),
+        state.configWritable ? "ok" : "error"
+      );
+    } catch (err) {
+      setMessage($("wz-result"), "✗ 重新检测失败：" + err.message, "error");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function verifyDraft() {
@@ -384,6 +425,7 @@
 
     $("wz-verify").addEventListener("click", verifyDraft);
     $("wz-save").addEventListener("click", saveFromWizard);
+    $("wz-recheck").addEventListener("click", recheckLocation);
   }
 
   // ------------------------------------------------------------ 结果渲染

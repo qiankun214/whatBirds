@@ -163,6 +163,7 @@ def create_app() -> FastAPI:
             "config": config.masked_dict(),
             "config_file": status["path"],
             "config_file_exists": status["exists"],
+            "config_loaded_from": status["loaded_from"],
             "config_writable": status["writable"],
             "config_file_error": status["error"],
             "config_location": {
@@ -171,6 +172,7 @@ def create_app() -> FastAPI:
                 "is_fallback": status["is_fallback"],
                 "warning": status["warning"],
                 "preferred_path": status["preferred_path"],
+                "preferred_error": status["preferred_error"],
                 "candidates": status["candidates"],
             },
             "defaults": ArkConfig().to_dict(),

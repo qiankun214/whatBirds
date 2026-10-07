@@ -145,6 +145,7 @@ def test_config_payload_covers_the_whole_wizard_form(client):
     assert isinstance(body["config_writable"], bool)
     assert body["config_location"]["label"]
     assert isinstance(body["config_location"]["candidates"], list)
+    assert "config_loaded_from" in body
 
     defaults = body["defaults"]
     for key in ("base_url", "model", "timeout", "max_tokens", "temperature", "max_image_side", "jpeg_quality"):

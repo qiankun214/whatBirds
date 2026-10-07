@@ -150,8 +150,13 @@ def cmd_config_show(args: argparse.Namespace) -> int:
     status = config_file_status()
     print(f"配置文件：{status['path']}（{'已存在' if status['exists'] else '尚未创建'}）")
     print(f"  位置：{status['label']}｜{'可写' if status['writable'] else '不可写'}")
+    loaded_from = status.get("loaded_from")
+    if loaded_from and loaded_from != status["path"]:
+        print(f"  当前读取自：{loaded_from}（下次保存会写入上面的新位置）")
     if status["warning"]:
         print(f"  提示：{status['warning']}")
+    if status["preferred_error"]:
+        print(f"  首选位置不可写原因：{status['preferred_error']}")
     if args.show_key:
         if not config.configured:
             print("API Key：未配置")
@@ -186,6 +191,9 @@ def cmd_config_doctor(_: argparse.Namespace) -> int:
     print(f"最终使用：{status['path']}")
     print(f"  位置：{status['label']}")
     print(f"  已存在：{'是' if status['exists'] else '否'}")
+    loaded_from = status.get("loaded_from")
+    if loaded_from and loaded_from != status["path"]:
+        print(f"  当前读取自：{loaded_from}")
     if status["warning"]:
         print(f"  提示：{status['warning']}")
 

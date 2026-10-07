@@ -216,6 +216,25 @@ def default_config_file() -> Path:
     return resolve_config_location().path
 
 
+def config_read_order() -> list[Path]:
+    """读取配置时的查找顺序：解析出的位置优先，其次是其他候选。
+
+    这样即使位置发生变化（例如从项目内兜底位置恢复到用户目录），
+    已经配置过的内容也不会「凭空消失」，只会提示保存到新位置。
+    """
+    resolved = resolve_config_location().path
+    others = [location.path for location in config_locations() if location.path != resolved]
+    return [resolved, *others]
+
+
+def existing_config_file() -> Path | None:
+    """当前实际能读到的配置文件（按 :func:`config_read_order`）。"""
+    for candidate in config_read_order():
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def config_file_status() -> dict[str, Any]:
     """配置位置的完整状态，供 GUI / CLI / 排障使用。"""
     global _resolved_location
@@ -243,6 +262,7 @@ def config_file_status() -> dict[str, Any]:
     return {
         "path": chosen_probe["path"],
         "exists": Path(chosen_probe["path"]).exists(),
+        "loaded_from": str(existing_config_file()) if existing_config_file() else None,
         "writable": chosen_probe["writable"],
         "error": chosen_probe["error"],
         "kind": chosen_probe["kind"],
@@ -250,6 +270,7 @@ def config_file_status() -> dict[str, Any]:
         "is_fallback": is_fallback,
         "warning": warning,
         "preferred_path": preferred["path"],
+        "preferred_error": preferred["error"] if not preferred["writable"] else None,
         "candidates": probes,
     }
 
@@ -352,10 +373,22 @@ class ArkConfig:
 
 # -------------------------------------------------------------------- 读写
 def load_config(path: str | os.PathLike[str] | None = None) -> ArkConfig:
-    """读取配置；文件不存在时返回带默认值的空配置（不报错）。"""
-    config_path = Path(path) if path is not None else default_config_file()
+    """读取配置；文件不存在时返回带默认值的空配置（不报错）。
+
+    未显式指定路径时按 :func:`config_read_order` 查找，
+    因此「配置位置发生变化」不会让已经配置好的内容凭空消失。
+    """
+    if path is not None:
+        config_path = Path(path)
+    else:
+        found = existing_config_file()
+        if found is None:
+            return ArkConfig()
+        config_path = found
+
     if not config_path.exists():
         return ArkConfig()
+
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -443,5 +476,7 @@ def _harden_permissions(path: Path) -> None:
 
 
 def config_exists(path: str | os.PathLike[str] | None = None) -> bool:
-    """配置文件是否已存在。"""
-    return (Path(path) if path is not None else default_config_file()).exists()
+    """配置文件是否已存在（未指定路径时按读取顺序查找）。"""
+    if path is not None:
+        return Path(path).exists()
+    return existing_config_file() is not None

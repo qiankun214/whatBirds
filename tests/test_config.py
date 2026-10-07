@@ -224,6 +224,59 @@ def test_status_marks_everything_unwritable(tmp_path, monkeypatch):
     assert status["error"]
 
 
+def test_status_reports_why_the_preferred_location_failed(tmp_path, monkeypatch):
+    """界面要能回答「为什么降级了」，所以首选位置的失败原因必须带出来。"""
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file", encoding="utf-8")
+
+    bad = ConfigLocation(blocker / "sub" / "config.json", "user", "首选（不可写）")
+    good = ConfigLocation(tmp_path / "ok" / "config.json", "localappdata", "备用（可写）")
+    monkeypatch.setattr(config_module, "config_locations", lambda: [bad, good])
+    monkeypatch.setattr(config_module, "_resolved_location", None)
+
+    status = config_file_status()
+
+    assert status["preferred_error"]
+    # OSError 的字符串里路径是转义过的，这里只校验能指认出错的位置
+    assert "blocker" in status["preferred_error"]
+
+
+def test_load_config_survives_location_change(tmp_path, monkeypatch):
+    """位置变化（例如从项目内兜底恢复到用户目录）不能让已配置内容凭空消失。"""
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+
+    legacy = tmp_path / "legacy" / "config.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({"ark": {"api_key": "sk-legacy"}}), encoding="utf-8")
+
+    new_location = ConfigLocation(tmp_path / "new" / "config.json", "user", "新位置（可写）")
+    old_location = ConfigLocation(legacy, "localappdata", "旧位置")
+    monkeypatch.setattr(config_module, "config_locations", lambda: [new_location, old_location])
+    monkeypatch.setattr(config_module, "_resolved_location", None)
+
+    loaded = load_config()
+
+    assert loaded.api_key == "sk-legacy"
+    assert config_file_status()["loaded_from"] == str(legacy)
+
+
+def test_explicit_path_never_falls_back(tmp_path, monkeypatch):
+    """显式指定路径时必须严格用它，不能偷偷去读别处的配置。"""
+    _clear_location_env(monkeypatch)
+    other = tmp_path / "other" / "config.json"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text(json.dumps({"ark": {"api_key": "sk-other"}}), encoding="utf-8")
+
+    missing = tmp_path / "not-here" / "config.json"
+
+    assert load_config(missing).api_key == ""
+
+
 def test_project_fallback_requires_git_ignore():
     """仓库内但未被 git 忽略的位置必须判定为不可用，否则密钥可能被提交。"""
     not_ignored = ConfigLocation(
