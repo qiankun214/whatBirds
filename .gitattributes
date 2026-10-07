@@ -1,0 +1,5 @@
+# Windows 批处理必须用 CRLF 行尾，否则 cmd.exe 会解析错乱；
+# 另外 .cmd/.bat 里不要写非 ASCII 字符（cmd 按 OEM 代码页读取，
+# 中文 Windows 上会让脚本被拆行、报出莫名的命令错误）。
+*.cmd text eol=crlf
+*.bat text eol=crlf
