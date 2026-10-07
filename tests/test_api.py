@@ -42,14 +42,19 @@ FAKE_RESULT = {
 class FakeRecognizer:
     """替身：仍然走真实的图片校验，但跳过网络调用。"""
 
-    fail_with: Exception | None = None
+    fail_with: "Exception | None" = None
+    last_config: "ArkConfig | None" = None
 
     def __init__(self, config=None, **kwargs):
         self.config = config or ArkConfig(api_key="sk-fake")
+        type(self).last_config = self.config
 
-    def _build(self, source: str) -> BirdIdentification:
+    def _raise_if_failing(self) -> None:
         if type(self).fail_with is not None:
             raise type(self).fail_with
+
+    def _build(self, source: str) -> BirdIdentification:
+        self._raise_if_failing()
         return BirdIdentification.from_model_output(
             FAKE_RESULT, source_image=source, model="fake-model", elapsed_seconds=0.5
         )
@@ -65,12 +70,14 @@ class FakeRecognizer:
         return self._build(source)
 
     def verify_connection(self) -> str:
+        self._raise_if_failing()
         return "正常"
 
 
 @pytest.fixture
 def client(monkeypatch):
     FakeRecognizer.fail_with = None
+    FakeRecognizer.last_config = None
     monkeypatch.setattr(web_app, "BirdRecognizer", FakeRecognizer)
     with TestClient(web_app.app) as test_client:
         yield test_client
@@ -127,6 +134,78 @@ def test_put_config_rejects_invalid_values(client):
     response = client.put("/api/config", json={"api_key": "sk-x", "jpeg_quality": 999}, headers=HEADERS)
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "ConfigError"
+
+
+# ------------------------------------------------------- 配置向导：草稿验证
+def test_config_payload_covers_the_whole_wizard_form(client):
+    """向导需要当前值、默认值与配置文件位置，接口要一次给全。"""
+    body = client.get("/api/config").json()
+    assert isinstance(body["config_file_exists"], bool)
+    assert body["config_file"]
+
+    defaults = body["defaults"]
+    for key in ("base_url", "model", "timeout", "max_tokens", "temperature", "max_image_side", "jpeg_quality"):
+        assert key in defaults, key
+
+
+def test_verify_requires_client_header(client):
+    assert client.post("/api/config/verify").status_code == 403
+
+
+def test_verify_uses_saved_config_when_no_body(client):
+    client.put("/api/config", json={"api_key": "sk-saved-123456", "model": "saved-model"}, headers=HEADERS)
+
+    response = client.post("/api/config/verify", headers=HEADERS)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["saved"] is False          # 验证不等于保存
+    assert body["tested"]["model"] == "saved-model"
+    assert "****" in body["tested"]["api_key"]
+    assert FakeRecognizer.last_config.api_key == "sk-saved-123456"
+
+
+def test_verify_draft_is_not_persisted(client):
+    """向导「先测通再保存」的核心：草稿只用于测试，绝不落盘。"""
+    client.put("/api/config", json={"api_key": "sk-saved-123456", "model": "saved-model"}, headers=HEADERS)
+
+    response = client.post(
+        "/api/config/verify",
+        json={"api_key": "sk-draft-abcdef", "model": "draft-model"},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert FakeRecognizer.last_config.api_key == "sk-draft-abcdef"
+    assert FakeRecognizer.last_config.model == "draft-model"
+
+    from whatbird.core import load_config
+
+    saved = load_config()
+    assert saved.api_key == "sk-saved-123456"
+    assert saved.model == "saved-model"
+
+
+def test_verify_masked_key_falls_back_to_saved(client):
+    """向导编辑态只改了模型、没重填 Key 时，应沿用已保存的 Key。"""
+    client.put("/api/config", json={"api_key": "sk-saved-123456", "model": "saved-model"}, headers=HEADERS)
+    masked = client.get("/api/config").json()["config"]["api_key"]
+
+    client.post("/api/config/verify", json={"api_key": masked, "model": "next-model"}, headers=HEADERS)
+
+    assert FakeRecognizer.last_config.api_key == "sk-saved-123456"
+    assert FakeRecognizer.last_config.model == "next-model"
+
+
+def test_verify_reports_failure_as_502(client):
+    client.put("/api/config", json={"api_key": "sk-saved-123456"}, headers=HEADERS)
+    FakeRecognizer.fail_with = ModelCallError("方舟服务异常", hint="稍后重试")
+
+    response = client.post("/api/config/verify", headers=HEADERS)
+
+    assert response.status_code == 502
+    assert response.json()["error"]["hint"] == "稍后重试"
 
 
 # ------------------------------------------------------------------ 识别
@@ -188,6 +267,34 @@ def test_frontend_is_served(client):
     assert "WhatBird" in response.text
 
 
+def test_config_wizard_markup_is_served(client):
+    """配置流程必须在 GUI 里可见可用：四步向导与关键控件都要在页面上。"""
+    html = client.get("/").text
+    for marker in (
+        'id="wizard"',
+        'id="open-wizard"',
+        'data-step="1"',
+        'data-step="2"',
+        'data-step="3"',
+        'data-step="4"',
+        'id="cfg-api-key"',
+        'id="cfg-base-url"',
+        'id="cfg-model"',
+        'id="cfg-max-tokens"',
+        'id="wz-verify"',
+        'id="wz-save"',
+        'id="wz-config-file"',
+    ):
+        assert marker in html, marker
+
+
 def test_static_assets_are_served(client):
     for asset in ("/static/style.css", "/static/app.js"):
         assert client.get(asset).status_code == 200
+
+
+def test_frontend_js_covers_wizard_steps(client):
+    js = client.get("/static/app.js").text
+    assert "TOTAL_STEPS = 4" in js
+    assert "/api/config/verify" in js
+    assert 'method: "PUT"' in js

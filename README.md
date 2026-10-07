@@ -44,6 +44,7 @@ WhatBird/
 ├── pyproject.toml
 ├── examples/
 │   └── config.example.json      # 配置模板（不含真实密钥，可提交）
+├── docs/screenshots/            # 界面截图（README 引用）
 ├── whatbird/
 │   ├── core/
 │   │   ├── config.py            # 配置读写 + 隔离 + 脱敏
@@ -57,7 +58,7 @@ WhatBird/
 │   └── web/
 │       ├── app.py               # FastAPI REST 层
 │       └── static/              # 原生 HTML/CSS/JS 前端
-└── tests/                       # pytest
+└── tests/                       # pytest（core / api / 前端契约）
 ```
 
 ---
@@ -95,7 +96,28 @@ python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirement
 ~/.whatbird/config.json
 ```
 
-写入配置（推荐交互式输入 Key，避免留在命令历史里）：
+配置入口有两个，读写的是**同一份文件**，效果完全相同。
+
+### 方式一：Web 配置向导（推荐）
+
+```bash
+python -m whatbird.cli serve
+```
+
+打开 <http://127.0.0.1:8000>，**首次进入会自动弹出四步配置向导**：
+
+1. **获取 Key** —— 直达方舟控制台的入口，说明需要开通的模型与推理接入点；
+2. **接入信息** —— API Key、Base URL、模型 / 推理接入点 ID，带即时校验；
+3. **高级参数** —— 超时、max_tokens、temperature、图片最长边、JPEG 质量，可一键恢复默认；
+4. **测试并保存** —— 「测试连接」用当前填写的内容试调一次方舟且**不写盘**，确认无误再「保存配置」。
+
+![配置向导第一步](docs/screenshots/config-wizard-step1.png)
+
+之后随时点右上角「API 配置」可重新进入向导；已保存的 Key 只以脱敏形式回显，留空即表示不修改。
+
+### 方式二：命令行
+
+推荐交互式输入 Key，避免留在命令历史里：
 
 ```bash
 python -m whatbird.cli config set --api-key -
@@ -185,18 +207,21 @@ python -m whatbird.cli serve --port 8000
 
 浏览器打开 <http://127.0.0.1:8000>：
 
-- 右上角「API 配置」可填写 / 修改 Key 并「测试连接」；
+- 首次进入自动弹出**配置向导**（四步：获取 Key → 接入信息 → 高级参数 → 测试并保存）；
+- 之后点右上角「API 配置」可随时回到向导修改，已保存的 Key 不会明文下发到浏览器；
 - 提供图片有两种方式：**上传图片** 或 **填写服务器上的 jpg 路径**；
 - 结果区展示中文名、学名、置信度、界门纲目科属种、识别依据、相似物种等。
+
+![配置向导第四步：测试并保存](docs/screenshots/config-wizard-step4.png)
 
 ### REST 接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 + 是否已配置 |
-| GET | `/api/config` | 读取配置（Key 脱敏） |
+| GET | `/api/config` | 读取配置（Key 脱敏）+ 高级参数默认值 + 配置文件位置 |
 | PUT | `/api/config` | 写入配置 |
-| POST | `/api/config/verify` | 验证配置可调通 |
+| POST | `/api/config/verify` | 测试连接；请求体可带「草稿」参数，**只测不存** |
 | POST | `/api/recognize` | 上传图片识别（multipart） |
 | POST | `/api/recognize-path` | 传入服务器 jpg 路径识别 |
 | GET | `/docs` | 自动生成的 OpenAPI 文档 |
@@ -219,7 +244,10 @@ curl -X POST http://127.0.0.1:8000/api/recognize-path ^
 python -m pytest
 ```
 
-测试全部使用假客户端（`FakeClient`）与临时配置目录，**不联网、不消耗额度、不接触真实配置**。
+- 全部使用假客户端（`FakeRecognizer`）与临时配置目录，**不联网、不消耗额度、不接触真实配置**；
+- `tests/test_frontend.py` 做**前端契约检查**：JS 里引用的元素 id / 类名 / 接口路径必须真实存在，
+  并守住「`hidden` 必须真的隐藏」这条样式兜底规则 —— 这类问题不会有编译期报错，
+  却会让向导整页点不动或遮罩一直挡住界面。
 
 ---
 

@@ -17,6 +17,11 @@
 
 * { box-sizing: border-box; }
 
+/* 全局兜底：任何带 hidden 属性的元素都必须真的不显示。
+   否则作者样式里的 display:flex/grid（如 .loading、.empty）会盖过浏览器默认的
+   [hidden] { display: none }，导致「隐藏」的元素一直显示在页面上。 */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);
@@ -153,11 +158,10 @@ h4 { margin: 22px 0 8px; font-size: 13.5px; letter-spacing: .4px; color: var(--i
 .facts dt { flex: 0 0 76px; color: var(--ink-soft); font-size: 13px; margin: 0; }
 .facts dd { margin: 0; }
 
-.alert { border-radius: 10px; padding: 10px 14px; font-size: 13.5px; margin: 14px 0 0; }
+.alert { border-radius: 10px; padding: 10px 14px; font-size: 13.5px; margin: 14px 0 0; white-space: pre-line; }
 .alert-error { background: var(--error-bg); border: 1px solid var(--error-line); color: #8d2020; }
 .alert-warn { background: var(--warn-bg); border: 1px solid var(--warn-line); color: #8a5a00; }
-.msg { margin: 12px 0 0; font-size: 13px; color: var(--brand-dark); }
-.msg.error { color: #8d2020; }
+.alert-ok { background: var(--brand-soft); border: 1px solid #bfe0cf; color: var(--brand-dark); }
 
 /* ---------------------------------------------------------------- 载入 */
 .loading {
@@ -172,4 +176,70 @@ h4 { margin: 22px 0 8px; font-size: 13.5px; letter-spacing: .4px; color: var(--i
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.footer { margin-top: 26px; text-align: center; color: var(--ink-soft); font-size: 12px; }
+.footer {
+  margin-top: 26px; text-align: center; color: var(--ink-soft); font-size: 12px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+
+/* ---------------------------------------------------------------- 配置向导 */
+body.modal-open { overflow: hidden; }
+
+.modal { position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.modal-backdrop { position: absolute; inset: 0; background: rgba(18, 32, 26, .45); backdrop-filter: blur(2px); }
+.modal-card {
+  position: relative; width: min(680px, 100%); max-height: 88vh;
+  display: flex; flex-direction: column; background: var(--bg-soft);
+  border-radius: 16px; box-shadow: 0 20px 60px rgba(20, 40, 30, .28); overflow: hidden;
+}
+
+.wizard-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--line);
+}
+.wizard-head h2 { margin: 0; font-size: 17px; }
+.icon-btn {
+  border: 0; background: transparent; color: var(--ink-soft); cursor: pointer;
+  font-size: 22px; line-height: 1; padding: 2px 8px; border-radius: 8px;
+}
+.icon-btn:hover { background: #f1f4f1; color: var(--ink); }
+
+.steps { display: flex; flex-wrap: wrap; gap: 14px; list-style: none; margin: 0; padding: 14px 20px 0; }
+.steps li { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-soft); }
+.steps li .dot {
+  width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center;
+  background: #eef2ef; font-size: 11.5px; font-weight: 600;
+}
+.steps li.active { color: var(--brand-dark); font-weight: 600; }
+.steps li.active .dot { background: var(--brand); color: #fff; }
+.steps li.done .dot { background: var(--brand-soft); color: var(--brand-dark); }
+
+#wz-msg { margin: 14px 20px 0; }
+
+.wizard-body { padding: 16px 20px; overflow-y: auto; }
+.wizard-body section[hidden] { display: none; }
+.wizard-body p { margin: 0 0 10px; }
+
+.wizard-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 20px; border-top: 1px solid var(--line); background: #fbfcfb;
+}
+.wizard-foot .spacer { flex: 1; }
+
+.hint { color: var(--ink-soft); font-size: 12.5px; margin: 10px 0 0; }
+.link-list { margin: 8px 0 0; padding-left: 20px; }
+.link-list li { margin-bottom: 6px; }
+a { color: var(--brand-dark); }
+code {
+  background: #eef2ef; border-radius: 5px; padding: 1px 5px;
+  font-family: Consolas, "Courier New", monospace; font-size: 12.5px;
+  word-break: break-all;
+}
+.inline { display: flex; gap: 8px; align-items: stretch; }
+.inline input { flex: 1; }
+.inline .btn { white-space: nowrap; }
+
+.summary { margin: 0; }
+.summary div { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.summary div:last-child { border-bottom: 0; }
+.summary dt { flex: 0 0 96px; color: var(--ink-soft); margin: 0; font-size: 13px; }
+.summary dd { margin: 0; word-break: break-all; }

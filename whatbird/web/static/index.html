@@ -18,47 +18,9 @@
       </div>
       <div class="topbar-right">
         <span id="status-pill" class="pill pill-unknown">检查配置中…</span>
-        <button id="toggle-config" class="btn btn-ghost" type="button">API 配置</button>
+        <button id="open-wizard" class="btn btn-ghost" type="button">API 配置</button>
       </div>
     </header>
-
-    <!-- ===================== 配置面板 ===================== -->
-    <section id="config-panel" class="card config-panel" hidden>
-      <div class="card-head">
-        <h2>API 配置</h2>
-        <span class="muted" id="config-file">配置文件：—</span>
-      </div>
-
-      <div class="grid-2">
-        <label class="field span-2">
-          <span>API Key</span>
-          <input id="cfg-api-key" type="password" placeholder="粘贴火山方舟 API Key（留空表示不修改）" autocomplete="off" />
-        </label>
-        <label class="field">
-          <span>Base URL</span>
-          <input id="cfg-base-url" type="text" placeholder="https://ark.cn-beijing.volces.com/api/v3" />
-        </label>
-        <label class="field">
-          <span>模型 / 接入点 ID</span>
-          <input id="cfg-model" type="text" placeholder="doubao-seed-2-1-lite 或 ep-xxxxxxxx" />
-        </label>
-        <label class="field">
-          <span>超时（秒）</span>
-          <input id="cfg-timeout" type="number" min="1" step="1" />
-        </label>
-        <label class="field">
-          <span>图片最长边（像素）</span>
-          <input id="cfg-max-side" type="number" min="64" step="16" />
-        </label>
-      </div>
-
-      <div class="row-actions">
-        <button id="save-config" class="btn btn-primary" type="button">保存配置</button>
-        <button id="verify-config" class="btn" type="button">测试连接</button>
-        <span class="muted">配置保存在用户目录，与项目隔离且不会提交到 git。</span>
-      </div>
-      <p id="config-msg" class="msg" hidden></p>
-    </section>
 
     <!-- ===================== 识别区 ===================== -->
     <main class="layout">
@@ -151,8 +113,118 @@
     </main>
 
     <footer class="footer">
-      <span>WhatBird · core / CLI / Web 前后端分离；识别结果由大模型生成，请结合实际观察核对。</span>
+      <span id="footer-config">WhatBird · core / CLI / Web 前后端分离</span>
+      <span>识别结果由大模型生成，请结合实际观察核对。</span>
     </footer>
+  </div>
+
+  <!-- ===================== 配置向导 ===================== -->
+  <div id="wizard" class="modal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="wz-title">
+      <header class="wizard-head">
+        <h2 id="wz-title">配置火山方舟 API</h2>
+        <button class="icon-btn" type="button" data-close aria-label="关闭">×</button>
+      </header>
+
+      <ol class="steps" id="wz-steps">
+        <li data-step-dot="1"><span class="dot">1</span>获取 Key</li>
+        <li data-step-dot="2"><span class="dot">2</span>接入信息</li>
+        <li data-step-dot="3"><span class="dot">3</span>高级参数</li>
+        <li data-step-dot="4"><span class="dot">4</span>测试并保存</li>
+      </ol>
+
+      <div id="wz-msg" class="alert" hidden></div>
+
+      <div class="wizard-body">
+        <!-- 步骤 1 -->
+        <section data-step="1">
+          <p>WhatBird 通过<strong>火山方舟（Ark）</strong>调用 Doubao-Seed-2.1 识别鸟类，所以需要先准备一个方舟 API Key。</p>
+          <ol class="link-list">
+            <li>打开火山方舟控制台：
+              <a href="https://console.volcengine.com/ark/region:cn-beijing" target="_blank" rel="noreferrer">console.volcengine.com/ark</a>
+            </li>
+            <li>在「API Key 管理」中创建一个 Key，并复制下来（只显示一次）。</li>
+            <li>确认已开通 Doubao-Seed-2.1 系列模型。模型详情见
+              <a href="https://console.volcengine.com/ark/region:cn-beijing/model/detail?name=doubao-seed-2-1-lite" target="_blank" rel="noreferrer">doubao-seed-2-1-lite</a>。
+            </li>
+            <li>（可选）在「在线推理」创建一个推理接入点，稍后把接入点 ID（<code>ep-xxxxxxxx</code>）填到模型一栏。</li>
+          </ol>
+          <p class="hint">Key 只会保存到<strong>本机用户目录</strong>，仅用于调用火山方舟；不会写入项目、也不会进 git。</p>
+        </section>
+
+        <!-- 步骤 2 -->
+        <section data-step="2" hidden>
+          <div class="grid-2">
+            <label class="field span-2">
+              <span>API Key</span>
+              <span class="inline">
+                <input id="cfg-api-key" type="password" placeholder="粘贴火山方舟 API Key" autocomplete="off" />
+                <button id="toggle-key" class="btn" type="button">显示</button>
+              </span>
+            </label>
+            <label class="field span-2">
+              <span>Base URL（方舟 OpenAI 兼容端点）</span>
+              <input id="cfg-base-url" type="text" placeholder="https://ark.cn-beijing.volces.com/api/v3" />
+            </label>
+            <label class="field span-2">
+              <span>模型 / 推理接入点 ID</span>
+              <input id="cfg-model" type="text" placeholder="doubao-seed-2-1-lite 或 ep-xxxxxxxx" />
+            </label>
+          </div>
+          <p class="hint" id="key-hint"></p>
+        </section>
+
+        <!-- 步骤 3 -->
+        <section data-step="3" hidden>
+          <div class="grid-2">
+            <label class="field">
+              <span>超时（秒）</span>
+              <input id="cfg-timeout" type="number" min="1" step="1" />
+            </label>
+            <label class="field">
+              <span>回答长度上限 max_tokens</span>
+              <input id="cfg-max-tokens" type="number" min="1" step="64" />
+            </label>
+            <label class="field">
+              <span>temperature（越低越稳定）</span>
+              <input id="cfg-temperature" type="number" min="0" max="2" step="0.1" />
+            </label>
+            <label class="field">
+              <span>图片最长边（像素）</span>
+              <input id="cfg-max-side" type="number" min="64" step="16" />
+            </label>
+            <label class="field">
+              <span>JPEG 质量（1~100）</span>
+              <input id="cfg-jpeg-quality" type="number" min="1" max="100" step="1" />
+            </label>
+          </div>
+          <p class="hint">不确定就保持默认：图片会按最长边等比缩小以节省 token，识别任务建议 temperature 保持较低。</p>
+          <div class="row-actions">
+            <button id="wz-reset-advanced" class="btn" type="button">恢复默认值</button>
+          </div>
+        </section>
+
+        <!-- 步骤 4 -->
+        <section data-step="4" hidden>
+          <dl class="summary" id="wz-summary"></dl>
+          <div class="row-actions">
+            <button id="wz-verify" class="btn" type="button">测试连接</button>
+            <button id="wz-save" class="btn btn-primary" type="button">保存配置</button>
+          </div>
+          <div id="wz-result" class="alert" hidden></div>
+          <p class="hint">「测试连接」用当前填写的内容试调一次方舟，<strong>不会写盘</strong>；「保存配置」会写入
+            <code id="wz-config-file">—</code>，一次配置长期有效。</p>
+        </section>
+      </div>
+
+      <footer class="wizard-foot">
+        <button id="wz-prev" class="btn" type="button">上一步</button>
+        <span class="spacer"></span>
+        <span id="wz-progress" class="muted"></span>
+        <button id="wz-next" class="btn btn-primary" type="button">下一步</button>
+      </footer>
+    </div>
   </div>
 
   <div id="loading" class="loading" hidden>

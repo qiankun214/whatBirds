@@ -1,6 +1,10 @@
 /**
  * WhatBird 前端：只与 REST API 通信，不含任何识别逻辑（前后端分离）。
  * 全部原生 JS，不依赖任何外部 CDN。
+ *
+ * 两块功能：
+ *   1) 配置向导（4 步）：获取 Key -> 接入信息 -> 高级参数 -> 测试并保存
+ *   2) 鸟类识别：上传图片 / 服务器文件路径 -> 渲染分类学结果
  */
 (function () {
   "use strict";
@@ -14,8 +18,21 @@
     ["habitat", "栖息环境"], ["distribution", "分布范围"],
     ["protection_status", "保护级别"], ["notes", "备注"]
   ];
+  var TOTAL_STEPS = 4;
+  var NEXT_LABELS = { 1: "下一步", 2: "下一步", 3: "下一步", 4: "完成" };
 
-  var $ = function (id) { return document.getElementById(id); };
+  var state = {
+    configured: false,
+    maskedKey: "",
+    configFile: "",
+    configFileExists: false,
+    config: null,
+    defaults: null,
+    step: 1,
+    saved: false
+  };
+
+  function $(id) { return document.getElementById(id); }
 
   // ------------------------------------------------------------ API 封装
   async function api(path, options) {
@@ -50,29 +67,44 @@
     box.textContent = message;
   }
 
-  // ------------------------------------------------------------ 配置
+  function setMessage(element, text, kind) {
+    if (!text) { element.hidden = true; element.textContent = ""; element.className = "alert"; return; }
+    element.hidden = false;
+    element.className = "alert " + (kind === "ok" ? "alert-ok" : kind === "warn" ? "alert-warn" : "alert-error");
+    element.textContent = text;
+  }
+
+  function maskKey(value) {
+    if (!value) { return ""; }
+    if (value.length <= 8) { return "*".repeat(value.length); }
+    return value.slice(0, 4) + "****" + value.slice(-4);
+  }
+
+  // ------------------------------------------------------------ 配置状态
   async function loadConfig() {
     var pill = $("status-pill");
     try {
       var data = await api("/api/config");
       var config = data.config || {};
-      $("config-file").textContent = "配置文件：" + (data.config_file || "—");
-      $("cfg-base-url").value = config.base_url || "";
-      $("cfg-model").value = config.model || "";
-      $("cfg-timeout").value = config.timeout != null ? config.timeout : "";
-      $("cfg-max-side").value = config.max_image_side != null ? config.max_image_side : "";
-      $("cfg-api-key").value = "";
-      $("cfg-api-key").placeholder = config.configured
-        ? "已配置（" + config.api_key + "），留空则不修改"
-        : "粘贴火山方舟 API Key";
 
-      if (config.configured) {
+      state.configured = !!config.configured;
+      state.maskedKey = config.api_key || "";
+      state.config = config;
+      state.configFile = data.config_file || "";
+      state.configFileExists = !!data.config_file_exists;
+      state.defaults = data.defaults || null;
+
+      $("wz-config-file").textContent = state.configFile || "—";
+      $("footer-config").textContent = state.configFileExists
+        ? "配置文件：" + state.configFile
+        : "尚未创建配置文件（保存后写入 " + (state.configFile || "~/.whatbird/config.json") + "）";
+
+      if (state.configured) {
         pill.textContent = "已配置 · " + (config.model || "");
         pill.className = "pill pill-ok";
       } else {
         pill.textContent = "尚未配置 API Key";
         pill.className = "pill pill-warn";
-        $("config-panel").hidden = false;
       }
       return config;
     } catch (err) {
@@ -83,49 +115,243 @@
     }
   }
 
-  async function saveConfig(event) {
-    event.preventDefault();
-    var msg = $("config-msg");
-    var body = {
+  // ------------------------------------------------------------ 向导：表单
+  function setIfPresent(id, value) {
+    $(id).value = (value === null || value === undefined) ? "" : value;
+  }
+
+  function fillIdentity(config) {
+    setIfPresent("cfg-base-url", config.base_url);
+    setIfPresent("cfg-model", config.model);
+    $("cfg-api-key").value = "";
+    $("cfg-api-key").type = "password";
+    $("toggle-key").textContent = "显示";
+  }
+
+  function fillAdvanced(config) {
+    setIfPresent("cfg-timeout", config.timeout);
+    setIfPresent("cfg-max-tokens", config.max_tokens);
+    setIfPresent("cfg-temperature", config.temperature);
+    setIfPresent("cfg-max-side", config.max_image_side);
+    setIfPresent("cfg-jpeg-quality", config.jpeg_quality);
+  }
+
+  function numberOrNull(id, integer) {
+    var raw = $(id).value.trim();
+    if (!raw) { return null; }
+    var value = integer ? parseInt(raw, 10) : parseFloat(raw);
+    return isNaN(value) ? null : value;
+  }
+
+  function collectDraft() {
+    return {
       api_key: $("cfg-api-key").value.trim(),
       base_url: $("cfg-base-url").value.trim(),
-      model: $("cfg-model").value.trim()
+      model: $("cfg-model").value.trim(),
+      timeout: numberOrNull("cfg-timeout", false),
+      max_tokens: numberOrNull("cfg-max-tokens", true),
+      temperature: numberOrNull("cfg-temperature", false),
+      max_image_side: numberOrNull("cfg-max-side", true),
+      jpeg_quality: numberOrNull("cfg-jpeg-quality", true)
     };
-    var timeout = parseFloat($("cfg-timeout").value);
-    var maxSide = parseInt($("cfg-max-side").value, 10);
-    if (!isNaN(timeout)) { body.timeout = timeout; }
-    if (!isNaN(maxSide)) { body.max_image_side = maxSide; }
+  }
 
+  function keyHint() {
+    $("key-hint").textContent = state.configured
+      ? "当前已保存：" + state.maskedKey + "（留空表示不修改，只在需要更换 Key 时才填写）"
+      : "还没有配置过 Key，请把控制台里复制的 Key 粘贴进来。";
+  }
+
+  // ------------------------------------------------------------ 向导：流程
+  function openWizard(startStep) {
+    state.saved = false;
+    setMessage($("wz-msg"), "");
+    setMessage($("wz-result"), "");
+    // 每次打开都按已保存的配置重新填充，避免上次未保存的输入残留
+    if (state.config) {
+      fillIdentity(state.config);
+      fillAdvanced(state.config);
+    } else if (state.defaults) {
+      fillAdvanced(state.defaults);
+    }
+    goStep(startStep || (state.configured ? 2 : 1), true);
+    $("wizard").hidden = false;
+    document.body.classList.add("modal-open");
+    $("wz-next").focus();
+  }
+
+  function closeWizard() {
+    $("wizard").hidden = true;
+    document.body.classList.remove("modal-open");
+  }
+
+  function goStep(step, silent) {
+    state.step = Math.min(Math.max(step, 1), TOTAL_STEPS);
+
+    var sections = document.querySelectorAll(".wizard-body section[data-step]");
+    sections.forEach(function (section) {
+      section.hidden = Number(section.dataset.step) !== state.step;
+    });
+
+    document.querySelectorAll("#wz-steps li").forEach(function (item) {
+      var index = Number(item.dataset.stepDot);
+      item.classList.toggle("active", index === state.step);
+      item.classList.toggle("done", index < state.step);
+    });
+
+    $("wz-prev").hidden = state.step === 1;
+    $("wz-next").textContent = NEXT_LABELS[state.step];
+    $("wz-progress").textContent = "第 " + state.step + " / " + TOTAL_STEPS + " 步";
+    if (!silent) { setMessage($("wz-msg"), ""); setMessage($("wz-result"), ""); }
+
+    if (state.step === 2) { keyHint(); }
+    if (state.step === 4) { renderSummary(); }
+  }
+
+  function validateIdentity() {
+    var key = $("cfg-api-key").value.trim();
+    if (!key && !state.configured) {
+      setMessage($("wz-msg"), "请先填写 API Key。", "error");
+      return false;
+    }
+    var baseUrl = $("cfg-base-url").value.trim();
+    if (!baseUrl || !/^https?:\/\//i.test(baseUrl)) {
+      setMessage($("wz-msg"), "Base URL 需要以 http:// 或 https:// 开头。", "error");
+      return false;
+    }
+    if (!$("cfg-model").value.trim()) {
+      setMessage($("wz-msg"), "请填写模型 ID 或推理接入点 ID。", "error");
+      return false;
+    }
+    setMessage($("wz-msg"), "");
+    return true;
+  }
+
+  function renderSummary() {
+    var draft = collectDraft();
+    var rows = [
+      ["API Key", draft.api_key ? maskKey(draft.api_key) + "（保存后生效）"
+        : (state.configured ? "沿用已保存的 " + state.maskedKey : "未填写")],
+      ["Base URL", draft.base_url || "（默认）"],
+      ["模型 / 接入点", draft.model || "（默认）"],
+      ["超时", draft.timeout !== null ? draft.timeout + " 秒" : "（默认）"],
+      ["max_tokens", draft.max_tokens !== null ? draft.max_tokens : "（默认）"],
+      ["temperature", draft.temperature !== null ? draft.temperature : "（默认）"],
+      ["图片最长边", draft.max_image_side !== null ? draft.max_image_side + " px" : "（默认）"],
+      ["JPEG 质量", draft.jpeg_quality !== null ? draft.jpeg_quality : "（默认）"],
+      ["保存位置", state.configFile || "（默认用户目录）"]
+    ];
+
+    var box = $("wz-summary");
+    box.innerHTML = "";
+    rows.forEach(function (pair) {
+      var row = document.createElement("div");
+      var dt = document.createElement("dt");
+      dt.textContent = pair[0];
+      var dd = document.createElement("dd");
+      dd.textContent = pair[1];
+      row.appendChild(dt);
+      row.appendChild(dd);
+      box.appendChild(row);
+    });
+  }
+
+  function setBusy(busy) {
+    $("wz-verify").disabled = busy;
+    $("wz-save").disabled = busy;
+    $("wz-next").disabled = busy;
+    $("wz-prev").disabled = busy;
+  }
+
+  async function verifyDraft() {
+    if (!validateIdentity()) { return; }
+    setBusy(true);
+    setMessage($("wz-result"), "正在测试连接…");
+    try {
+      var data = await api("/api/config/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(collectDraft())
+      });
+      var tested = data.tested || {};
+      setMessage(
+        $("wz-result"),
+        "✓ 连接正常（模型 " + (tested.model || "-") + "，Key " + (tested.api_key || "-") + "）\n" +
+        "模型回复：" + (data.model_reply || "") + "\n注意：这次测试没有写盘，确认无误后请点「保存配置」。",
+        "ok"
+      );
+    } catch (err) {
+      setMessage($("wz-result"), "✗ 测试失败：" + err.message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveFromWizard() {
+    if (!validateIdentity()) { goStep(2, true); return; }
+    setBusy(true);
+    setMessage($("wz-result"), "正在保存…");
     try {
       var data = await api("/api/config", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
+        body: JSON.stringify(collectDraft())
       });
-      msg.hidden = false;
-      msg.className = "msg";
-      msg.textContent = data.message || "已保存";
+      state.saved = true;
       await loadConfig();
+      setMessage(
+        $("wz-result"),
+        "✓ " + (data.message || "配置已保存") + "\n文件位置：" + (data.config_file || state.configFile) +
+        "\n现在就可以回到主界面开始识别了。",
+        "ok"
+      );
+      $("wz-next").textContent = "完成";
+      renderSummary();
     } catch (err) {
-      msg.hidden = false;
-      msg.className = "msg error";
-      msg.textContent = err.message;
+      setMessage($("wz-result"), "✗ 保存失败：" + err.message, "error");
+    } finally {
+      setBusy(false);
     }
   }
 
-  async function verifyConfig() {
-    var msg = $("config-msg");
-    msg.hidden = false;
-    msg.className = "msg";
-    msg.textContent = "正在测试连接…";
-    try {
-      var data = await api("/api/config/verify", { method: "POST" });
-      msg.className = "msg";
-      msg.textContent = "✓ 连接正常，模型回复：" + (data.model_reply || "");
-    } catch (err) {
-      msg.className = "msg error";
-      msg.textContent = err.message;
-    }
+  function bindWizard() {
+    $("open-wizard").addEventListener("click", function () {
+      openWizard(state.configured ? 2 : 1);
+    });
+
+    $("wizard").addEventListener("click", function (event) {
+      if (event.target.dataset && event.target.dataset.close !== undefined) { closeWizard(); }
+    });
+
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && !$("wizard").hidden) { closeWizard(); }
+    });
+
+    $("wz-prev").addEventListener("click", function () { goStep(state.step - 1); });
+
+    $("wz-next").addEventListener("click", function () {
+      if (state.step < TOTAL_STEPS) {
+        if (state.step === 2 && !validateIdentity()) { return; }
+        goStep(state.step + 1);
+        return;
+      }
+      closeWizard();
+      if (state.saved) { showError(""); }
+    });
+
+    $("toggle-key").addEventListener("click", function () {
+      var input = $("cfg-api-key");
+      var show = input.type === "password";
+      input.type = show ? "text" : "password";
+      $("toggle-key").textContent = show ? "隐藏" : "显示";
+    });
+
+    $("wz-reset-advanced").addEventListener("click", function () {
+      if (state.defaults) { fillAdvanced(state.defaults); }
+    });
+
+    $("wz-verify").addEventListener("click", verifyDraft);
+    $("wz-save").addEventListener("click", saveFromWizard);
   }
 
   // ------------------------------------------------------------ 结果渲染
@@ -220,9 +446,17 @@
   }
 
   // ------------------------------------------------------------ 识别
+  function requireConfigured() {
+    if (state.configured) { return true; }
+    showError("还没有配置 API Key，请先在「API 配置」里完成配置。");
+    openWizard(1);
+    return false;
+  }
+
   async function recognizeUpload() {
     var input = $("file-input");
     if (!input.files || !input.files.length) { return; }
+    if (!requireConfigured()) { return; }
 
     var form = new FormData();
     form.append("file", input.files[0]);
@@ -242,6 +476,7 @@
   async function recognizePath() {
     var path = $("path-input").value.trim();
     if (!path) { showError("请先填写 jpg 文件路径。"); return; }
+    if (!requireConfigured()) { return; }
 
     showError("");
     setLoading(true);
@@ -323,21 +558,22 @@
     button.addEventListener("click", recognizeUpload);
   }
 
-  function init() {
+  async function init() {
     bindTabs();
     bindFilePicker();
-    $("toggle-config").addEventListener("click", function () {
-      var panel = $("config-panel");
-      panel.hidden = !panel.hidden;
-      if (!panel.hidden) { panel.scrollIntoView({ behavior: "smooth", block: "nearest" }); }
-    });
-    $("save-config").addEventListener("click", saveConfig);
-    $("verify-config").addEventListener("click", verifyConfig);
+    bindWizard();
     $("btn-recognize-path").addEventListener("click", recognizePath);
     $("path-input").addEventListener("keydown", function (event) {
       if (event.key === "Enter") { recognizePath(); }
     });
-    loadConfig();
+
+    var config = await loadConfig();
+    if (config) {
+      fillIdentity(config);
+      fillAdvanced(config);
+      // 首次使用：直接打开配置向导
+      if (!state.configured) { openWizard(1); }
+    }
   }
 
   document.addEventListener("DOMContentLoaded", init);
