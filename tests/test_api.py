@@ -18,6 +18,7 @@ from whatbird.core import (
     WhatBirdError,
 )
 from whatbird.core.image_input import prepare_image, prepare_image_bytes
+from whatbird.core.prompt import build_prompt_set
 
 # 用 importlib 明确取子模块，避免包属性与子模块同名的歧义
 web_app = importlib.import_module("whatbird.web.app")
@@ -59,6 +60,10 @@ class FakeRecognizer:
     def __init__(self, config=None, **kwargs):
         self.config = config or ArkConfig(api_key="sk-fake")
         type(self).last_config = self.config
+
+    def prompts(self, mode=None):
+        """任务管理器会读它来记录本次用的模式。"""
+        return build_prompt_set(mode or "full", config_max_tokens=self.config.max_tokens)
 
     def _raise_if_failing(self) -> None:
         if type(self).fail_with is not None:
@@ -242,6 +247,29 @@ def test_verify_ignores_consent_flag(client):
     )
 
     assert response.status_code == 200
+
+
+def test_put_config_accepts_speed_settings(client):
+    """速度相关的设置（快速模式、并发数）必须能存下来。"""
+    response = client.put(
+        "/api/config",
+        json={"api_key": "sk-1234567890", "fast_mode": True, "concurrency": 5},
+        headers=HEADERS,
+    )
+    assert response.status_code == 200
+
+    config = client.get("/api/config").json()["config"]
+    assert config["fast_mode"] is True
+    assert config["concurrency"] == 5
+
+
+def test_put_config_rejects_bad_concurrency(client):
+    response = client.put(
+        "/api/config",
+        json={"api_key": "sk-1234567890", "concurrency": 99},
+        headers=HEADERS,
+    )
+    assert response.status_code == 400
 
 
 def test_save_response_reports_where_it_went(client):
@@ -463,8 +491,13 @@ def test_batch_reports_progress_fields(client, jpeg_factory):
         assert snapshot["total"] == 4
         assert snapshot["current_index"] >= 1
         assert snapshot["current_source"]
+        # 进度与提速相关的字段：并发数、模式、并发进行中的清单
+        assert snapshot["concurrency"] == 3
+        assert snapshot["mode"] in {"full", "fast"}
+        assert isinstance(snapshot["active"], list)
         assert set(snapshot) >= {"job_id", "status", "stopped", "total", "completed",
                                  "succeeded", "failed", "current_index", "current_source",
+                                 "concurrency", "mode", "active",
                                  "elapsed_seconds", "items"}
         _wait_for_terminal(client, job_id)
     finally:

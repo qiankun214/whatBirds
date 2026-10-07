@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from .config import ArkConfig
@@ -23,6 +24,43 @@ from .errors import ConfigError, ModelCallError
 #: 配置连通性自检时的提示词
 PING_SYSTEM_PROMPT = "你是一个连通性自检助手，只需按要求回答。"
 PING_USER_PROMPT = "请只回复两个字：正常"
+
+
+@dataclass(slots=True)
+class ModelReply:
+    """模型的一次回答 + token 用量（用量用于判断耗时花在哪）。"""
+
+    text: str
+    usage: dict[str, int] | None = None
+
+
+def normalize_reply(reply: Any) -> tuple[str, dict[str, int] | None]:
+    """把客户端返回值统一成 ``(文本, 用量)``。
+
+    允许返回纯字符串（测试替身、旧实现都这么做），此时用量为 None。
+    """
+    if isinstance(reply, ModelReply):
+        return reply.text, reply.usage
+    if isinstance(reply, str):
+        return reply, None
+    text = getattr(reply, "text", None)
+    if text is None:
+        raise ModelCallError("模型客户端返回了无法识别的结果", hint=f"实际类型：{type(reply).__name__}")
+    return str(text), getattr(reply, "usage", None)
+
+
+def _extract_usage(response: Any) -> dict[str, int] | None:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return None
+    payload: dict[str, int] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = getattr(usage, key, None)
+        if value is None and isinstance(usage, dict):
+            value = usage.get(key)
+        if isinstance(value, int):
+            payload[key] = value
+    return payload or None
 
 
 # --------------------------------------------------------------------- 消息构造
@@ -105,15 +143,16 @@ class ArkVisionClient:
         system_prompt: str,
         user_prompt: str,
         image_data_url: str,
-    ) -> str:
-        """同步：把一张图片（base64 data URL）连同提示词发给模型，返回文本回答。"""
+        max_tokens: int | None = None,
+    ) -> ModelReply:
+        """同步：把一张图片（base64 data URL）连同提示词发给模型。"""
         _ensure_data_url(image_data_url)
         messages = build_image_messages(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             image_data_url=image_data_url,
         )
-        return self._chat(messages)
+        return self._chat(messages, max_tokens=max_tokens)
 
     async def acomplete_with_image(
         self,
@@ -121,7 +160,8 @@ class ArkVisionClient:
         system_prompt: str,
         user_prompt: str,
         image_data_url: str,
-    ) -> str:
+        max_tokens: int | None = None,
+    ) -> ModelReply:
         """异步：同上，但可以被取消（批处理任务靠它实现「终止」）。"""
         _ensure_data_url(image_data_url)
         messages = build_image_messages(
@@ -129,18 +169,23 @@ class ArkVisionClient:
             user_prompt=user_prompt,
             image_data_url=image_data_url,
         )
-        return await self._achat(messages)
+        return await self._achat(messages, max_tokens=max_tokens)
 
     def complete_text(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 32) -> str:
         """同步纯文本调用（用于配置连通性自检）。"""
-        return self._chat(build_text_messages(system_prompt=system_prompt, user_prompt=user_prompt), max_tokens=max_tokens)
-
-    async def acomplete_text(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 32) -> str:
-        """异步纯文本调用。"""
-        return await self._achat(
+        reply = self._chat(
             build_text_messages(system_prompt=system_prompt, user_prompt=user_prompt),
             max_tokens=max_tokens,
         )
+        return reply.text
+
+    async def acomplete_text(self, *, system_prompt: str, user_prompt: str, max_tokens: int = 32) -> str:
+        """异步纯文本调用。"""
+        reply = await self._achat(
+            build_text_messages(system_prompt=system_prompt, user_prompt=user_prompt),
+            max_tokens=max_tokens,
+        )
+        return reply.text
 
     def ping(self) -> str:
         """用一次极小的请求验证 api_key / base_url / model 是否可用。"""
@@ -151,7 +196,7 @@ class ArkVisionClient:
         return await self.acomplete_text(system_prompt=PING_SYSTEM_PROMPT, user_prompt=PING_USER_PROMPT)
 
     # ------------------------------------------------------------- 统一调用
-    def _chat(self, messages: list[dict[str, Any]], *, max_tokens: int | None = None) -> str:
+    def _chat(self, messages: list[dict[str, Any]], *, max_tokens: int | None = None) -> ModelReply:
         try:
             response = self.sync_client.chat.completions.create(
                 model=self.config.model,
@@ -162,9 +207,9 @@ class ArkVisionClient:
         except Exception as exc:  # noqa: BLE001 - 统一翻译成中文业务异常
             raise _translate_error(exc, model=self.config.model) from exc
 
-        return _extract_text(response)
+        return ModelReply(text=_extract_text(response), usage=_extract_usage(response))
 
-    async def _achat(self, messages: list[dict[str, Any]], *, max_tokens: int | None = None) -> str:
+    async def _achat(self, messages: list[dict[str, Any]], *, max_tokens: int | None = None) -> ModelReply:
         try:
             response = await self.async_client.chat.completions.create(
                 model=self.config.model,
@@ -176,7 +221,7 @@ class ArkVisionClient:
             # 注意：asyncio.CancelledError 不是 Exception 的子类，会自然向外传播 —— 这正是取消要的
             raise _translate_error(exc, model=self.config.model) from exc
 
-        return _extract_text(response)
+        return ModelReply(text=_extract_text(response), usage=_extract_usage(response))
 
 
 def _ensure_data_url(image_data_url: str) -> None:

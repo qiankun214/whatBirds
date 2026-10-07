@@ -147,7 +147,9 @@ class BirdIdentification:
     # 元数据
     source_image: str = ""
     model: str = ""
+    mode: str = "full"
     elapsed_seconds: float = 0.0
+    usage: dict[str, int] | None = None
     raw_response: str = ""
 
     # --------------------------------------------------------------- 构造
@@ -158,7 +160,9 @@ class BirdIdentification:
         *,
         source_image: str = "",
         model: str = "",
+        mode: str = "full",
         elapsed_seconds: float = 0.0,
+        usage: dict[str, int] | None = None,
         raw_response: str = "",
     ) -> "BirdIdentification":
         """把模型返回的 JSON 字典规整成强类型对象（容忍字段缺失/类型偏差）。"""
@@ -184,7 +188,9 @@ class BirdIdentification:
             notes=_as_str(data.get("notes") or data.get("comment")),
             source_image=source_image,
             model=model,
+            mode=mode,
             elapsed_seconds=elapsed_seconds,
+            usage=usage,
             raw_response=raw_response,
         )
 
@@ -208,8 +214,10 @@ class BirdIdentification:
             "notes": self.notes,
             "meta": {
                 "model": self.model,
+                "mode": self.mode,
                 "source_image": self.source_image,
                 "elapsed_seconds": round(self.elapsed_seconds, 3),
+                "usage": self.usage,
             },
         }
         if include_raw:
@@ -268,6 +276,7 @@ class BatchReport:
 
     total: int
     items: list[BatchItem] = field(default_factory=list)
+    mode: str = "full"
     stopped: bool = False
     elapsed_seconds: float = 0.0
 
@@ -286,6 +295,7 @@ class BatchReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "total": self.total,
+            "mode": self.mode,
             "completed": self.completed,
             "succeeded": self.succeeded,
             "failed": self.failed,

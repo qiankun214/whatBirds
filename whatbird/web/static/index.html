@@ -224,6 +224,18 @@
               <span>JPEG 质量（1~100）</span>
               <input id="cfg-jpeg-quality" type="number" min="1" max="100" step="1" />
             </label>
+            <label class="field">
+              <span>批量并发数（1~8）</span>
+              <input id="cfg-concurrency" type="number" min="1" max="8" step="1" />
+            </label>
+          </div>
+          <div class="consent">
+            <label class="checkbox">
+              <input id="cfg-fast-mode" type="checkbox" />
+              <span><strong>快速模式</strong>：只返回中文名 / 学名与七级分类学，
+                不返回识别依据、相似物种、栖息环境、分布范围、保护级别等说明性内容。
+                模型是逐 token 生成输出的，字段越少越快 —— 单张通常能快一半以上。</span>
+            </label>
           </div>
           <p class="hint">不确定就保持默认：图片会按最长边等比缩小以节省 token，识别任务建议 temperature 保持较低。</p>
           <div class="row-actions">

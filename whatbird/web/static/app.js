@@ -134,7 +134,14 @@
 
     var currentIndex = snapshot.current_index || 0;
     var currentName = snapshot.current_source || "";
-    if (currentIndex >= 1 && currentIndex <= total) {
+    var active = snapshot.active || [];
+
+    if (active.length > 1) {
+      // 并发时同时有好几张在跑，如实列出，而不是只显示其中一张
+      var names = active.map(function (item) { return item.source; }).join("、");
+      $("loading-progress").textContent =
+        "已完成 " + done + " / " + total + " 张 · 进行中：" + names;
+    } else if (currentIndex >= 1 && currentIndex <= total) {
       $("loading-progress").textContent = "正在识别第 " + currentIndex + " / " + total + " 张"
         + (currentName ? "：" + currentName : "");
     } else {
@@ -315,8 +322,12 @@
     var meta = result.meta || {};
     var parts = [];
     if (meta.model) { parts.push("模型 " + meta.model); }
+    if (meta.mode === "fast") { parts.push("快速模式"); }
     if (extraMeta) { parts.push(extraMeta); }
     if (typeof meta.elapsed_seconds === "number") { parts.push("耗时 " + meta.elapsed_seconds.toFixed(2) + "s"); }
+    if (meta.usage && meta.usage.total_tokens) {
+      parts.push("token 输入 " + meta.usage.prompt_tokens + " / 输出 " + meta.usage.completion_tokens);
+    }
     $("result-meta").textContent = parts.join(" ｜ ");
   }
 
@@ -348,6 +359,8 @@
     renderBatchTable(snapshot);
     $("batch-summary-text").textContent =
       "共 " + snapshot.total + " 张：成功 " + snapshot.succeeded + " · 失败 " + snapshot.failed
+      + (snapshot.mode === "fast" ? " · 快速模式" : "")
+      + (snapshot.concurrency > 1 ? " · 并发 " + snapshot.concurrency : "")
       + (snapshot.stopped ? " · 已终止" : "")
       + " · 用时 " + (snapshot.elapsed_seconds || 0).toFixed(1) + "s";
 
@@ -490,6 +503,8 @@
     setIfPresent("cfg-temperature", config.temperature);
     setIfPresent("cfg-max-side", config.max_image_side);
     setIfPresent("cfg-jpeg-quality", config.jpeg_quality);
+    setIfPresent("cfg-concurrency", config.concurrency);
+    $("cfg-fast-mode").checked = !!config.fast_mode;
   }
 
   function numberOrNull(id, integer) {
@@ -509,6 +524,8 @@
       temperature: numberOrNull("cfg-temperature", false),
       max_image_side: numberOrNull("cfg-max-side", true),
       jpeg_quality: numberOrNull("cfg-jpeg-quality", true),
+      concurrency: numberOrNull("cfg-concurrency", true),
+      fast_mode: $("cfg-fast-mode").checked,
       allow_project_fallback: $("wz-allow-project").checked
     };
   }
@@ -639,6 +656,8 @@
       ["temperature", draft.temperature !== null ? draft.temperature : "（默认）"],
       ["图片最长边", draft.max_image_side !== null ? draft.max_image_side + " px" : "（默认）"],
       ["JPEG 质量", draft.jpeg_quality !== null ? draft.jpeg_quality : "（默认）"],
+      ["识别模式", draft.fast_mode ? "快速模式（只要名称 + 分类学）" : "完整模式"],
+      ["批量并发数", draft.concurrency !== null ? draft.concurrency : "（默认）"],
       ["位置类型", state.needsConsent
         ? "用户级位置不可写（需勾选同意后才用项目内位置）"
         : (state.location

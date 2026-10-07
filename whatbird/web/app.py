@@ -34,7 +34,7 @@ from typing import Any, List, Optional
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from .. import __version__
 from ..core import (
@@ -76,7 +76,13 @@ class UTF8JSONResponse(JSONResponse):
 
 # --------------------------------------------------------------------- 出入参
 class ConfigUpdate(BaseModel):
-    """配置更新请求体；字段为 ``None`` 表示不修改。"""
+    """配置更新请求体；字段为 ``None`` 表示不修改。
+
+    刻意设置 ``extra="forbid"``：pydantic 默认会**静默忽略**未声明的字段，
+    那样前端一旦写错字段名就会「看起来保存成功、其实没生效」。
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     api_key: Optional[str] = Field(default=None, description="方舟 API Key；留空或回传脱敏串则不修改")
     base_url: Optional[str] = None
@@ -86,6 +92,8 @@ class ConfigUpdate(BaseModel):
     temperature: Optional[float] = None
     max_image_side: Optional[int] = None
     jpeg_quality: Optional[int] = None
+    fast_mode: Optional[bool] = Field(default=None, description="快速模式：只返回名称 + 七级分类学")
+    concurrency: Optional[int] = Field(default=None, description="批量并发数 1~8")
     allow_project_fallback: Optional[bool] = Field(
         default=None,
         description="是否同意把配置保存到项目内兜底位置（默认不同意，不会自动降级）",

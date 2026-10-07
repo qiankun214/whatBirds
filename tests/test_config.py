@@ -111,6 +111,31 @@ def test_validate_rejects_bad_quality():
         ArkConfig(api_key="sk-abc", jpeg_quality=0).validate()
 
 
+def test_concurrency_bounds():
+    with pytest.raises(ConfigError):
+        ArkConfig(api_key="sk-abc", concurrency=0).validate()
+    with pytest.raises(ConfigError):
+        ArkConfig(api_key="sk-abc", concurrency=9).validate()
+    assert ArkConfig(api_key="sk-abc", concurrency=1).validate().concurrency == 1
+    assert ArkConfig(api_key="sk-abc", concurrency=8).validate().concurrency == 8
+
+
+def test_speed_settings_round_trip(tmp_path):
+    target = tmp_path / "config.json"
+    save_config(ArkConfig(api_key="sk-1", fast_mode=True, concurrency=5), target)
+
+    loaded = load_config(target)
+
+    assert loaded.fast_mode is True
+    assert loaded.concurrency == 5
+
+
+def test_speed_defaults_keep_old_behaviour():
+    config = ArkConfig()
+    assert config.fast_mode is False  # 默认仍是完整模式
+    assert config.concurrency == 3
+
+
 def test_masked_dict_hides_secret():
     config = ArkConfig(api_key="sk-1234567890abcdef")
     masked = config.masked_dict()

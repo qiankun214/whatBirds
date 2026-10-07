@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import pytest
 
 from whatbird.core import ArkConfig, ConfigError, ModelCallError, ResponseParseError
-from whatbird.core.ark_client import _extract_text, _translate_error
-from whatbird.core.prompt import parse_json_object
+from whatbird.core.ark_client import ModelReply, _extract_text, _translate_error, normalize_reply
+from whatbird.core.prompt import FAST_MAX_TOKENS, parse_json_object
 from whatbird.core.recognizer import BirdRecognizer
 
 MODEL_JSON = {
@@ -44,12 +45,15 @@ class FakeClient:
         self.image_calls: list[dict] = []
         self.pinged = False
 
-    def complete_with_image(self, *, system_prompt, user_prompt, image_data_url) -> str:
+    def complete_with_image(
+        self, *, system_prompt, user_prompt, image_data_url, max_tokens=None
+    ) -> str:
         self.image_calls.append(
             {
                 "system_prompt": system_prompt,
                 "user_prompt": user_prompt,
                 "image_data_url": image_data_url,
+                "max_tokens": max_tokens,
             }
         )
         return self.reply
@@ -215,12 +219,15 @@ def test_timeout_error_translation():
 class FakeAsyncClient(FakeClient):
     """异步版假客户端：供 aiter_batch 使用。"""
 
-    async def acomplete_with_image(self, *, system_prompt, user_prompt, image_data_url) -> str:
+    async def acomplete_with_image(
+        self, *, system_prompt, user_prompt, image_data_url, max_tokens=None
+    ) -> str:
         self.image_calls.append(
             {
                 "system_prompt": system_prompt,
                 "user_prompt": user_prompt,
                 "image_data_url": image_data_url,
+                "max_tokens": max_tokens,
             }
         )
         return self.reply
@@ -366,3 +373,170 @@ def test_arecognize_single(jpeg_factory):
     result = asyncio.run(run())
     assert result.chinese_name == "白鹡鸰"
     assert result.taxonomy.family == "鹡鸰科 Motacillidae"
+
+
+# ------------------------------------------------------------------ 快速模式
+def test_fast_mode_sends_shorter_prompt_and_caps_tokens(jpeg_factory):
+    recognizer, client = _recognizer()
+
+    result = recognizer.recognize(str(jpeg_factory()), mode="fast")
+
+    call = client.image_calls[0]
+    assert call["max_tokens"] == FAST_MAX_TOKENS
+    assert len(call["system_prompt"]) < len(recognizer.prompts("full").system), "快速模式的提示词应当更短"
+    assert result.mode == "fast"
+
+
+def test_fast_mode_can_come_from_config(jpeg_factory):
+    client = FakeClient()
+    recognizer = BirdRecognizer(ArkConfig(api_key="sk-test", fast_mode=True), client=client)
+
+    result = recognizer.recognize(str(jpeg_factory()))
+
+    assert result.mode == "fast"
+    assert client.image_calls[0]["max_tokens"] == FAST_MAX_TOKENS
+
+
+def test_full_mode_uses_configured_max_tokens(jpeg_factory):
+    """完整模式用配置里的 max_tokens；只有快速模式才压到 FAST_MAX_TOKENS。"""
+    recognizer, client = _recognizer()
+    recognizer.recognize(str(jpeg_factory()), mode="full")
+    assert client.image_calls[0]["max_tokens"] == 2048
+
+    custom = FakeClient()
+    custom_recognizer = BirdRecognizer(ArkConfig(api_key="sk-test", max_tokens=800), client=custom)
+    custom_recognizer.recognize(str(jpeg_factory("b.jpg")), mode="full")
+    assert custom.image_calls[0]["max_tokens"] == 800
+
+
+def test_normalize_mode_accepts_aliases():
+    from whatbird.core.prompt import MODE_FAST as FAST
+    from whatbird.core.prompt import MODE_FULL as FULL
+    from whatbird.core.prompt import normalize_mode
+
+    assert normalize_mode(None) == FULL
+    assert normalize_mode("fast") == FAST
+    assert normalize_mode("FAST") == FAST
+    assert normalize_mode("快速") == FAST
+    assert normalize_mode("full") == FULL
+    assert normalize_mode("随便什么") == FULL
+
+
+# ------------------------------------------------------------------ token 用量
+def test_usage_is_captured_from_client_reply(jpeg_factory):
+    client = FakeClient()
+    client.reply = ModelReply(
+        text=json.dumps(MODEL_JSON, ensure_ascii=False),
+        usage={"prompt_tokens": 3210, "completion_tokens": 480, "total_tokens": 3690},
+    )
+    recognizer = BirdRecognizer(ArkConfig(api_key="sk-test"), client=client)
+
+    result = recognizer.recognize(str(jpeg_factory()))
+
+    assert result.usage == {"prompt_tokens": 3210, "completion_tokens": 480, "total_tokens": 3690}
+    assert result.to_dict()["meta"]["usage"]["completion_tokens"] == 480
+
+
+def test_usage_is_none_for_plain_string_reply(jpeg_factory):
+    """旧式客户端只返回字符串时不能报错，只是没有用量信息。"""
+    recognizer, _ = _recognizer()
+    assert recognizer.recognize(str(jpeg_factory())).usage is None
+
+
+def test_normalize_reply_handles_both_shapes():
+    text, usage = normalize_reply("hello")
+    assert (text, usage) == ("hello", None)
+
+    text, usage = normalize_reply(ModelReply(text="hi", usage={"total_tokens": 5}))
+    assert text == "hi" and usage == {"total_tokens": 5}
+
+
+# ------------------------------------------------------------------ 批量并发
+class SlowAsyncClient(FakeAsyncClient):
+    """带延迟的假客户端，用来观察并发是否真的重叠。"""
+
+    def __init__(self, delay: float, reply: str = "") -> None:
+        super().__init__(reply)
+        self.delay = delay
+        self.started = 0
+        self.inflight = 0
+        self.peak = 0
+
+    async def acomplete_with_image(self, *, system_prompt, user_prompt, image_data_url, max_tokens=None):
+        self.started += 1
+        self.inflight += 1
+        self.peak = max(self.peak, self.inflight)
+        try:
+            await asyncio.sleep(self.delay)
+            return await super().acomplete_with_image(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_data_url=image_data_url,
+                max_tokens=max_tokens,
+            )
+        finally:
+            self.inflight -= 1
+
+
+def test_concurrency_overlaps_requests(jpeg_factory):
+    paths = [str(jpeg_factory(f"p{i}.jpg")) for i in range(6)]
+
+    async def run(concurrency):
+        client = SlowAsyncClient(0.2)
+        recognizer = BirdRecognizer(
+            ArkConfig(api_key="sk-test", concurrency=concurrency), client=client
+        )
+        started = time.perf_counter()
+        items = [item async for item in recognizer.aiter_batch(paths)]
+        return items, client, time.perf_counter() - started
+
+    concurrent_items, concurrent_client, concurrent_seconds = asyncio.run(run(3))
+    serial_items, serial_client, serial_seconds = asyncio.run(run(1))
+
+    # 结果一样多、一样全
+    assert len(concurrent_items) == len(serial_items) == 6
+    assert sorted(item.index for item in concurrent_items) == [1, 2, 3, 4, 5, 6]
+    assert all(item.ok for item in concurrent_items)
+    # 并发度真的生效
+    assert serial_client.peak == 1
+    assert concurrent_client.peak == 3
+    assert concurrent_seconds < serial_seconds
+
+
+def test_concurrency_keeps_every_result_on_partial_failure(jpeg_factory):
+    good = str(jpeg_factory("good.jpg"))
+
+    async def run():
+        client = FakeAsyncClient()
+        recognizer = BirdRecognizer(ArkConfig(api_key="sk-test", concurrency=3), client=client)
+        return [item async for item in recognizer.aiter_batch([good, "E:/nope.jpg", good, "E:/nope2.jpg"])]
+
+    items = sorted(asyncio.run(run()), key=lambda item: item.index)
+
+    assert [item.status for item in items] == ["ok", "error", "ok", "error"]
+    assert all(item.index == position for position, item in enumerate(items, start=1))
+
+
+def test_cancel_stops_pending_requests_under_concurrency(jpeg_factory):
+    """并发时取消任务，未开始的图片不应再发出请求。"""
+    paths = [str(jpeg_factory(f"z{i}.jpg")) for i in range(8)]
+
+    async def scenario():
+        client = SlowAsyncClient(0.3)
+        recognizer = BirdRecognizer(ArkConfig(api_key="sk-test", concurrency=2), client=client)
+
+        async def consume():
+            async for _ in recognizer.aiter_batch(paths):
+                pass
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.1)  # 让第一批请求发出去
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return client
+
+    client = asyncio.run(scenario())
+
+    assert client.started < 8, "取消后不应继续把剩下的图片发出去"
+    assert client.started >= 1

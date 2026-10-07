@@ -437,6 +437,10 @@ class ArkConfig:
     temperature: float = 0.1
     max_image_side: int = 1568
     jpeg_quality: int = 88
+    #: 快速模式：只问名称 + 七级分类学，输出短很多，单张明显更快
+    fast_mode: bool = False
+    #: 批量识别的并发数（1 = 完全串行；越大越快，但可能触发限流）
+    concurrency: int = 3
 
     # ---------------------------------------------------------------- 状态
     @property
@@ -469,6 +473,11 @@ class ArkConfig:
             raise ConfigError(f"max_image_side 不能小于 64，当前为 {self.max_image_side!r}")
         if not 1 <= self.jpeg_quality <= 100:
             raise ConfigError(f"jpeg_quality 需在 1~100 之间，当前为 {self.jpeg_quality!r}")
+        if not 1 <= self.concurrency <= 8:
+            raise ConfigError(
+                f"concurrency 需在 1~8 之间，当前为 {self.concurrency!r}",
+                hint="1 表示完全串行；批量时建议 3~4，过大可能触发限流",
+            )
         return self
 
     # ---------------------------------------------------------------- 序列化

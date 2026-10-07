@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import getpass
 import json
 import sys
@@ -43,6 +44,7 @@ from .core.config import (
     DEFAULT_MODEL,
     write_failure_hint,
 )
+from .core.prompt import MODE_FAST, MODE_FULL
 from .core.recognizer import BirdRecognizer
 
 
@@ -100,10 +102,19 @@ def _render_result(result: BirdIdentification) -> str:
             lines.append(f"{label}：{value}")
 
     lines.append("")
-    lines.append(
-        f"元数据：模型 {result.model or '-'} ｜ 图片 {result.source_image or '-'} "
-        f"｜ 耗时 {result.elapsed_seconds:.2f}s"
-    )
+    meta_bits = [
+        f"模型 {result.model or '-'}",
+        f"图片 {result.source_image or '-'}",
+        f"耗时 {result.elapsed_seconds:.2f}s",
+    ]
+    if result.mode == MODE_FAST:
+        meta_bits.append("快速模式")
+    if result.usage:
+        meta_bits.append(
+            f"token 输入 {result.usage.get('prompt_tokens', '-')}"
+            f" / 输出 {result.usage.get('completion_tokens', '-')}"
+        )
+    lines.append("元数据：" + " ｜ ".join(meta_bits))
     return "\n".join(lines)
 
 
@@ -259,38 +270,61 @@ def cmd_config_verify(_: argparse.Namespace) -> int:
 def cmd_identify(args: argparse.Namespace) -> int:
     recognizer = BirdRecognizer(load_config())
     images = list(args.images)
+    mode = args.mode
 
-    # ---- 单张：保持原有输出格式完全不变 ----
+    # ---- 单张：保持原有输出格式，仅追加 token 信息 ----
     if len(images) == 1:
-        result = recognizer.recognize(images[0])
+        result = recognizer.recognize(images[0], mode=mode)
         if args.json:
             print(json.dumps(result.to_dict(include_raw=args.raw), ensure_ascii=False, indent=2))
         else:
             print(_render_result(result))
         return 0
 
-    # ---- 多张：依次识别，边跑边报进度 ----
-    return _run_batch(recognizer, images, as_json=args.json)
+    # ---- 多张：依次识别（可并发），边跑边报进度 ----
+    return _run_batch(
+        recognizer,
+        images,
+        as_json=args.json,
+        mode=mode,
+        concurrency=args.concurrency,
+    )
 
 
-def _run_batch(recognizer: BirdRecognizer, images: list[str], *, as_json: bool) -> int:
-    report = BatchReport(total=len(images))
+def _run_batch(
+    recognizer: BirdRecognizer,
+    images: list[str],
+    *,
+    as_json: bool,
+    mode: str | None,
+    concurrency: int | None,
+) -> int:
+    report = BatchReport(total=len(images), mode=recognizer.prompts(mode).mode)
     interrupted = False
     started = time.perf_counter()
 
     def on_start(index: int, total: int, name: str) -> None:
         print(f"[{index}/{total}] 正在识别：{name}", file=sys.stderr, flush=True)
 
-    try:
-        for item in recognizer.iter_batch(images, on_start=on_start):
+    async def drive() -> None:
+        async for item in recognizer.aiter_batch(
+            images,
+            on_start=on_start,
+            mode=mode,
+            concurrency=concurrency,
+        ):
             report.items.append(item)
             if not as_json:
                 print(_render_batch_line(item), flush=True)
+
+    try:
+        asyncio.run(drive())
     except KeyboardInterrupt:
         interrupted = True
         print("\n已中止（Ctrl+C）", file=sys.stderr)
     finally:
         report.elapsed_seconds = time.perf_counter() - started
+        report.items.sort(key=lambda item: item.index)
         report.stopped = interrupted or report.completed < report.total
 
     if as_json:
@@ -299,6 +333,7 @@ def _run_batch(recognizer: BirdRecognizer, images: list[str], *, as_json: bool) 
         print(
             f"\n批量结束：共 {report.total} 张，成功 {report.succeeded}，失败 {report.failed}"
             f"，用时 {report.elapsed_seconds:.1f}s"
+            + (f"（{report.mode} 模式）" if report.mode == MODE_FAST else "")
             + ("（已中止）" if report.stopped else "")
         )
     return 130 if interrupted else 0
@@ -314,7 +349,12 @@ def _render_batch_line(item: BatchItem) -> str:
         body = f"{name}{latin}  科：{family}  置信度 {result.confidence:.0%}"
     else:
         body = f"失败：{item.error_message}"
-    return f"[{item.index}/{item.total}] {body}  | {item.source}  {item.elapsed_seconds:.1f}s"
+
+    usage = ""
+    if item.ok and item.identification is not None and item.identification.usage:
+        tokens = item.identification.usage
+        usage = f"  token {tokens.get('prompt_tokens', '-')}/{tokens.get('completion_tokens', '-')}"
+    return f"[{item.index}/{item.total}] {body}  | {item.source}  {item.elapsed_seconds:.1f}s{usage}"
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
@@ -432,7 +472,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     identify_parser.add_argument("--json", action="store_true", help="以 JSON 输出（便于脚本处理）")
     identify_parser.add_argument("--raw", action="store_true", help="JSON 输出中包含模型原始返回（仅单张）")
-    identify_parser.set_defaults(handler=cmd_identify)
+    identify_parser.add_argument(
+        "--fast",
+        dest="mode",
+        action="store_const",
+        const=MODE_FAST,
+        help="快速模式：只返回名称与分类学信息（输出短得多，单张明显更快）",
+    )
+    identify_parser.add_argument(
+        "--full",
+        dest="mode",
+        action="store_const",
+        const=MODE_FULL,
+        help="完整模式（默认；实际取决于配置里的 fast_mode）",
+    )
+    identify_parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="批量并发数 1~8（默认取配置，通常是 3；1 = 完全串行）",
+    )
+    identify_parser.set_defaults(handler=cmd_identify, mode=None)
 
     # serve
     serve_parser = subparsers.add_parser("serve", help="启动 Web 服务（后端 + 静态前端）")

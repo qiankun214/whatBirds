@@ -29,6 +29,10 @@ class BatchJob:
     sources: list[ImageSource]
     status: str = "pending"  # pending / running / done / stopped / failed
     items: list[BatchItem] = field(default_factory=list)
+    #: 正在识别中的：{序号: 文件名}（并发时会有多个）
+    active: dict[int, str] = field(default_factory=dict)
+    mode: str = "full"
+    concurrency: int = 1
     current_index: int = 0
     current_source: str = ""
     error_message: str = ""
@@ -62,15 +66,22 @@ class BatchJob:
             "completed": self.completed,
             "succeeded": self.succeeded,
             "failed": self.failed,
+            "mode": self.mode,
+            "concurrency": self.concurrency,
             "current_index": self.current_index,
             "current_source": self.current_source,
+            "active": [
+                {"index": index, "source": source}
+                for index, source in sorted(self.active.items())
+            ],
             "elapsed_seconds": round(self.elapsed_seconds(), 3),
             "error": (
                 {"message": self.error_message, "hint": self.error_hint}
                 if self.error_message
                 else None
             ),
-            "items": [item.to_dict() for item in self.items],
+            # 并发时完成顺序不定，统一按输入顺序输出，界面才好对齐
+            "items": [item.to_dict() for item in sorted(self.items, key=lambda item: item.index)],
         }
 
 
@@ -91,6 +102,8 @@ class BatchJobManager:
     def start(self, recognizer: BirdRecognizer, sources: list[ImageSource]) -> BatchJob:
         """创建任务并在当前事件循环里启动（必须在 async 上下文调用）。"""
         job = BatchJob(id=uuid.uuid4().hex[:12], total=len(sources), sources=sources)
+        job.mode = recognizer.prompts().mode
+        job.concurrency = max(1, int(recognizer.config.concurrency))
         self._jobs[job.id] = job
         self._trim()
         job.task = asyncio.create_task(self._run(job, recognizer))
@@ -111,11 +124,13 @@ class BatchJobManager:
         job.status = "running"
 
         def on_start(index: int, total: int, name: str) -> None:
+            job.active[index] = name
             job.current_index = index
             job.current_source = name
 
         try:
             async for item in recognizer.aiter_batch(job.sources, on_start=on_start):
+                job.active.pop(item.index, None)
                 job.items.append(item)
             job.status = "done"
         except asyncio.CancelledError:
@@ -131,6 +146,7 @@ class BatchJobManager:
             job.error_hint = str(exc)[:300]
         finally:
             job.finished_at = time.time()
+            job.active.clear()
             job.current_index = 0
             job.current_source = ""
 

@@ -9,6 +9,8 @@
     "max_tokens": 2048,
     "temperature": 0.1,
     "max_image_side": 1568,
-    "jpeg_quality": 88
+    "jpeg_quality": 88,
+    "fast_mode": false,
+    "concurrency": 3
   }
 }
