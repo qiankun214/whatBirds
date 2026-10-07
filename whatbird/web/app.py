@@ -180,6 +180,7 @@ def create_app() -> FastAPI:
                 "warning": status["warning"],
                 "preferred_path": status["preferred_path"],
                 "preferred_error": status["preferred_error"],
+                "interpreter": status["interpreter"],
                 "candidates": status["candidates"],
             },
             "defaults": ArkConfig().to_dict(),

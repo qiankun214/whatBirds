@@ -42,6 +42,7 @@ import contextlib
 import json
 import os
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -270,6 +271,81 @@ def existing_config_file() -> Path | None:
     return None
 
 
+def interpreter_status() -> dict[str, Any]:
+    """当前解释器的信息与「是否位于项目内」的判断。
+
+    受限环境（沙箱 / 安全策略）常常把**项目内的解释器**限制为只能写工作区，
+    因此「用户目录不可写」时，换一个项目外的 Python 往往就能解决。
+    这里把这个判断做成可展示的诊断信息。
+    """
+    executable = Path(sys.executable)
+    inside_project = _is_inside_project(executable)
+    hint: str | None = None
+    if inside_project:
+        hint = (
+            f"当前解释器位于项目内：{executable}\n"
+            "受限环境常把项目内解释器限制为只能写工作区。若用户目录不可写，"
+            "请改用项目外的 Python（例如系统 Python）来运行 whatbird。"
+        )
+    return {
+        "executable": str(executable),
+        "version": sys.version.split()[0],
+        "inside_project": inside_project,
+        "hint": hint,
+    }
+
+
+def migrate_config(
+    *,
+    allow_project: bool | None = None,
+    remove_old: bool = False,
+) -> dict[str, Any]:
+    """把现有配置迁到当前解析出的可写位置。
+
+    典型用途：先在受限环境里把配置写进了项目内兜底位置，
+    之后换成不受限的解释器运行，用本函数把配置搬回 ``~/.whatbird/config.json``。
+    """
+    source = existing_config_file()
+    if source is None:
+        raise ConfigError(
+            "没有找到任何现有配置",
+            hint="先用 whatbird config set 写入一份配置，再执行迁移",
+        )
+
+    config = load_config(source)
+    target = resolve_config_location(allow_project=allow_project).path
+
+    if target == source:
+        return {
+            "migrated": False,
+            "from": str(source),
+            "path": str(target),
+            "removed_old": False,
+            "message": "配置已经位于当前使用的位置，无需迁移",
+        }
+
+    saved = save_config(config, allow_project=allow_project)
+
+    removed_old = False
+    if remove_old and source != saved:
+        try:
+            source.unlink()
+            removed_old = True
+        except OSError as exc:
+            raise ConfigError(
+                f"新位置已写入成功，但删除旧配置失败：{source}",
+                hint=f"{exc}；新配置在 {saved}，可手动删除旧文件",
+            ) from exc
+
+    return {
+        "migrated": True,
+        "from": str(source),
+        "path": str(saved),
+        "removed_old": removed_old,
+        "message": "配置已迁移到新位置",
+    }
+
+
 def config_file_status(*, allow_project: bool | None = None) -> dict[str, Any]:
     """配置位置的完整状态，供 GUI / CLI / 排障使用。"""
     locations = config_locations()
@@ -326,6 +402,7 @@ def config_file_status(*, allow_project: bool | None = None) -> dict[str, Any]:
         "warning": warning,
         "preferred_path": preferred["path"],
         "preferred_error": preferred["error"] if not preferred["writable"] else None,
+        "interpreter": interpreter_status(),
         "candidates": probes,
     }
 

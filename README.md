@@ -63,26 +63,42 @@ WhatBird/
 
 ---
 
-## 2. 安装
+## 2. 安装与运行环境
 
-本机已经在仓库内准备好一个虚拟环境 `E:\WhatBird\.venv`（依赖已装齐），直接用它即可：
+> ### ⚠ 不要用项目内的解释器
+>
+> 本机实测：**位于工作区内的 Python（例如项目里的 `.venv`）被限制为只能写工作区**，
+> 于是配置写不进 `~/.whatbird/`，只能降级到项目内位置；**项目外的解释器不受此限**。
+> 这不是代码问题 —— `whatbird.cmd config doctor` 会直接告诉你是哪种情况。
+
+本机已经准备好一个**项目外**的独立环境：
 
 ```bat
-.venv\Scripts\python -m whatbird.cli --help
+C:\Users\qiankun\whatbird-venv\Scripts\python -m whatbird.cli config doctor
 ```
 
-下文命令里的 `python` 都指**这个虚拟环境的解释器**；若你在自己的终端里操作，先激活它
-（`.venv\Scripts\activate`）或直接写全路径。
+也可以直接用仓库根目录的启动器 `whatbird.cmd`，它会自动挑选项目外的解释器
+（可用环境变量 `WHATBIRD_PYTHON` 覆盖）：
 
-要在别的环境里安装，请使用清华镜像（`Agent.md` 第 2 条）：
-
-```bash
-python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements-dev.txt
+```bat
+whatbird.cmd config set --api-key -
+whatbird.cmd serve --port 8000
 ```
 
-> 两个已踩过的坑：
+下文命令里的 `python` 都指**这个项目外环境的解释器**。
+
+自己重建环境（清华镜像，`Agent.md` 第 2 条）：
+
+```bat
+python -m venv %USERPROFILE%\whatbird-venv
+%USERPROFILE%\whatbird-venv\Scripts\python -m pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements-dev.txt
+```
+
+> 三个已踩过的坑：
 > 1. `requirements*.txt` 保持纯 ASCII —— 中文 Windows 上 pip 用 GBK 读取，中文注释会抛 `UnicodeDecodeError`。
-> 2. 如果 pip 长时间卡住不动，加上 `--no-cache-dir`（pip 的 HTTP 缓存目录不可写时会一直空转）。
+> 2. pip 长时间卡住不动时加 `--no-cache-dir`（pip 缓存目录不可写时会一直空转）。
+> 3. **不要把本项目装进系统 Python**：那会升级共享的 pydantic / Pillow，可能弄坏你原有的包
+>    （例如 spacy 3.6 需要 pydantic v1、gradio 3.45 需要 Pillow < 11）。务必用独立 venv。
 
 
 ---

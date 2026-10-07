@@ -19,7 +19,9 @@ from whatbird.core.config import (
     config_locations,
     default_config_file,
     git_ignores,
+    interpreter_status,
     mask_secret,
+    migrate_config,
     probe_location,
     project_consent_granted,
     resolve_config_location,
@@ -375,3 +377,101 @@ def test_save_failure_hint_is_actionable(tmp_path):
 def test_write_failure_hint_mentions_the_directory(tmp_path):
     hint = write_failure_hint(tmp_path / "a" / "config.json", "PermissionError: 拒绝访问")
     assert str(tmp_path / "a") in hint
+
+
+# ------------------------------------------------------- 解释器与配置迁移
+def test_interpreter_status_reports_executable():
+    status = interpreter_status()
+
+    assert status["executable"]
+    assert status["version"]
+    assert isinstance(status["inside_project"], bool)
+    if status["inside_project"]:
+        assert status["hint"] and "项目内" in status["hint"]
+    else:
+        assert status["hint"] is None
+
+
+def _two_locations(tmp_path, legacy_key: str = "sk-legacy"):
+    legacy = tmp_path / "legacy" / "config.json"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(
+        json.dumps({"ark": {"api_key": legacy_key, "model": "m1"}}),
+        encoding="utf-8",
+    )
+    target = tmp_path / "new" / "config.json"
+    return (
+        ConfigLocation(legacy, "project", "旧位置（项目内）"),
+        ConfigLocation(target, "user", "新位置（可写）"),
+        legacy,
+        target,
+    )
+
+
+def test_migrate_moves_config_to_writable_location(tmp_path, monkeypatch):
+    """受限环境里配置落在了项目内，换解释器后应能一键搬回用户目录。"""
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
+    old, new, legacy, target = _two_locations(tmp_path)
+    monkeypatch.setattr(config_module, "config_locations", lambda: [new, old])
+
+    result = migrate_config()
+
+    assert result["migrated"] is True
+    assert result["from"] == str(legacy)
+    assert result["path"] == str(target)
+    assert json.loads(target.read_text(encoding="utf-8"))["ark"]["api_key"] == "sk-legacy"
+    assert legacy.exists(), "默认不删除旧配置"
+
+
+def test_migrate_can_remove_old_copy(tmp_path, monkeypatch):
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
+    old, new, legacy, target = _two_locations(tmp_path, legacy_key="sk-secret")
+    monkeypatch.setattr(config_module, "config_locations", lambda: [new, old])
+
+    result = migrate_config(remove_old=True)
+
+    assert result["removed_old"] is True
+    assert not legacy.exists()
+    assert json.loads(target.read_text(encoding="utf-8"))["ark"]["api_key"] == "sk-secret"
+
+
+def test_migrate_is_noop_when_already_in_place(tmp_path, monkeypatch):
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
+
+    current = tmp_path / "user" / "config.json"
+    current.parent.mkdir(parents=True, exist_ok=True)
+    current.write_text(json.dumps({"ark": {"api_key": "sk-here"}}), encoding="utf-8")
+    monkeypatch.setattr(
+        config_module,
+        "config_locations",
+        lambda: [ConfigLocation(current, "user", "用户目录")],
+    )
+
+    result = migrate_config()
+
+    assert result["migrated"] is False
+    assert result["path"] == str(current)
+
+
+def test_migrate_without_any_config_raises(tmp_path, monkeypatch):
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
+    monkeypatch.setattr(
+        config_module,
+        "config_locations",
+        lambda: [ConfigLocation(tmp_path / "none" / "config.json", "user", "空位置")],
+    )
+
+    with pytest.raises(ConfigError):
+        migrate_config()

@@ -250,13 +250,15 @@
     }
 
     if (!state.configWritable) {
+      var interp = (state.location && state.location.interpreter) || {};
       setMessage(
         box,
         "当前所有候选配置位置都不可写，直接保存会失败。\n" +
         "处理办法：在普通（非受限）终端里重新运行 whatbird serve；" +
         "或用环境变量指定一个可写位置：" +
         "set WHATBIRD_CONFIG_FILE=D:\\whatbird\\config.json\n" +
-        "也可以在命令行运行 whatbird config doctor 查看每个位置的具体原因。",
+        "也可以在命令行运行 whatbird config doctor 查看每个位置的具体原因。" +
+        (interp.hint ? "\n\n" + interp.hint : ""),
         "error"
       );
       return;

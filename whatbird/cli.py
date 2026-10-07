@@ -28,7 +28,9 @@ from .core import (
     WhatBirdError,
     config_file_status,
     default_config_file,
+    interpreter_status,
     load_config,
+    migrate_config,
     save_config,
 )
 from .core.config import (
@@ -182,6 +184,11 @@ def cmd_config_path(_: argparse.Namespace) -> int:
 def cmd_config_doctor(_: argparse.Namespace) -> int:
     """排查「配置存不下来」：逐个候选位置真实试写并报告。"""
     status = config_file_status()
+    interp = interpreter_status()
+
+    print(f"当前解释器：{interp['executable']}（Python {interp['version']}）")
+    print(f"  位于项目内：{'是' if interp['inside_project'] else '否'}")
+    print()
 
     print("配置位置候选（按优先级，逐个真实试写）：")
     for index, candidate in enumerate(status["candidates"], start=1):
@@ -210,6 +217,32 @@ def cmd_config_doctor(_: argparse.Namespace) -> int:
     if not status["writable"]:
         print()
         print(write_failure_hint(Path(status["path"]), status["error"] or "未知原因"))
+        if interp["hint"]:
+            print()
+            print("解释器提示：")
+            for line in interp["hint"].splitlines():
+                print(f"  {line}")
+    return 0
+
+
+def cmd_config_migrate(args: argparse.Namespace) -> int:
+    """把现有配置迁移到当前可写位置（典型场景：从项目内兜底位置搬到用户目录）。"""
+    result = migrate_config(remove_old=args.remove_old)
+
+    if not result["migrated"]:
+        print(result["message"])
+        print(f"  位置：{result['path']}")
+        return 0
+
+    print(f"已迁移：{result['from']}")
+    print(f"    ->  {result['path']}")
+    if result["removed_old"]:
+        print("  旧配置已删除")
+    else:
+        print(f"  旧配置仍保留：{result['from']}（加 --remove-old 可自动删除）")
+
+    status = config_file_status()
+    print(f"  当前使用位置：{status['label']}")
     return 0
 
 
@@ -316,6 +349,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="排查配置写入失败：逐个候选位置试写并给出处理办法",
     )
     doctor_parser.set_defaults(handler=cmd_config_doctor)
+
+    migrate_parser = config_sub.add_parser(
+        "migrate",
+        help="把现有配置迁移到当前可写位置（例如从项目内搬到用户目录）",
+    )
+    migrate_parser.add_argument(
+        "--remove-old",
+        action="store_true",
+        dest="remove_old",
+        help="迁移成功后删除旧配置文件",
+    )
+    migrate_parser.set_defaults(handler=cmd_config_migrate)
 
     verify_parser = config_sub.add_parser("verify", help="验证配置能否成功调用方舟")
     verify_parser.set_defaults(handler=cmd_config_verify)
