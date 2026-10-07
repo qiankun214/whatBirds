@@ -13,13 +13,31 @@
 测试或多环境场景可用环境变量覆盖位置（只覆盖路径，不承载密钥）：
 
 - ``WHATBIRD_CONFIG_DIR``   指定配置目录
-- ``WHATBIRD_CONFIG_FILE``  直接指定配置文件
+- ``WHATBIRD_CONFIG_FILE``  直接指定配置文件（此时不做任何降级，失败就报错）
+
+### 位置降级（本机环境适配）
+
+有些环境（受限沙箱、受限终端、安全软件策略）不允许进程往用户主目录写东西，
+表现为 ``PermissionError: [WinError 5] 拒绝访问``，但目录权限其实是正常的。
+为了不让「保存配置」直接失败，``config_locations()`` 给出一个候选链，
+``resolve_config_location()`` 会**真实探测**每个位置能否建目录 + 写文件，取第一个可用的：
+
+1. ``~/.whatbird/config.json``                用户目录（首选，隔离性最好）
+2. ``%LOCALAPPDATA%\\WhatBird\\config.json``   本机应用数据目录
+3. ``%APPDATA%\\WhatBird\\config.json``        漫游应用数据目录
+4. ``<项目>/.whatbird/config.json``            最后兜底：位于仓库内，**只有在 git 确认已忽略它时才允许使用**
+
+第 4 项是为了兼容「进程只能写工作区」这类受限环境；它是否可用由 ``git check-ignore``
+实时判定，因此 Agent.md 第 7 条「不能被提交到 git 上」仍然由 git 本身强制保证。
+无论最终用哪个位置，界面与 CLI 都会显示真实路径，并在不是首选位置时给出提示。
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import subprocess
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
@@ -42,20 +60,198 @@ CONFIG_SECTION = "ark"
 CONFIG_VERSION = 1
 
 
+CONFIG_FILE_NAME = "config.json"
+
+#: 项目内兜底目录名（只有在 git 确认忽略时才允许使用）
+PROJECT_FALLBACK_DIR = ".whatbird"
+
+_resolved_location: "ConfigLocation | None" = None
+
+
+@dataclass(frozen=True)
+class ConfigLocation:
+    """一个候选配置位置。"""
+
+    path: Path
+    kind: str  # user / localappdata / appdata / project / explicit
+    label: str
+    inside_project: bool = False
+
+
 def default_config_dir() -> Path:
-    """配置目录（默认 ``~/.whatbird``）。"""
+    """首选配置目录（默认 ``~/.whatbird``）。"""
     override = os.environ.get(CONFIG_DIR_ENV)
     if override:
         return Path(override).expanduser()
     return Path.home() / ".whatbird"
 
 
+def _explicit_location() -> "ConfigLocation | None":
+    """环境变量显式指定的位置：不做降级，出问题就直接报错。"""
+    override_file = os.environ.get(CONFIG_FILE_ENV)
+    if override_file:
+        return ConfigLocation(Path(override_file).expanduser(), "explicit", f"{CONFIG_FILE_ENV} 指定的位置")
+    override_dir = os.environ.get(CONFIG_DIR_ENV)
+    if override_dir:
+        return ConfigLocation(
+            Path(override_dir).expanduser() / CONFIG_FILE_NAME,
+            "explicit",
+            f"{CONFIG_DIR_ENV} 指定的位置",
+        )
+    return None
+
+
+def config_locations() -> list[ConfigLocation]:
+    """按优先级列出候选配置位置。"""
+    explicit = _explicit_location()
+    if explicit is not None:
+        return [explicit]
+
+    locations = [
+        ConfigLocation(default_config_dir() / CONFIG_FILE_NAME, "user", "用户目录 ~/.whatbird"),
+    ]
+    for env_name, label in (
+        ("LOCALAPPDATA", "本机应用数据目录"),
+        ("APPDATA", "漫游应用数据目录"),
+    ):
+        base = os.environ.get(env_name)
+        if base:
+            locations.append(
+                ConfigLocation(Path(base) / "WhatBird" / CONFIG_FILE_NAME, env_name.lower(), label)
+            )
+    locations.append(
+        ConfigLocation(
+            PROJECT_ROOT / PROJECT_FALLBACK_DIR / CONFIG_FILE_NAME,
+            "project",
+            "项目内兜底位置（已被 git 忽略）",
+            inside_project=True,
+        )
+    )
+    return locations
+
+
+def git_ignores(path: Path) -> bool:
+    """git 是否忽略该路径。
+
+    这是项目内兜底位置的硬门槛：只有 git 确认忽略，才敢把密钥放进去，
+    从而由 git 本身保证「不会被提交」（Agent.md 第 7 条）。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", "--", str(path)],
+            cwd=str(PROJECT_ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def probe_location(location: ConfigLocation) -> dict[str, Any]:
+    """真实试一次「建目录 + 写探针文件」，判断该位置能不能用。
+
+    比 ``os.access`` 靠谱：Windows 上 ACL 正常却仍被进程级策略拦截的情况，
+    只有真的写一次才能发现。
+    """
+    directory = location.path.parent
+    writable = True
+    error: str | None = None
+
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / f".whatbird-write-probe-{os.getpid()}"
+        try:
+            probe.write_text("ok", encoding="utf-8")
+        finally:
+            with contextlib.suppress(OSError):
+                probe.unlink()
+    except OSError as exc:
+        writable = False
+        error = str(exc)
+
+    git_ignored: bool | None = None
+    if writable and location.inside_project:
+        git_ignored = git_ignores(location.path)
+        if not git_ignored:
+            writable = False
+            error = "位于项目仓库内，但 git 并未忽略该路径；为避免密钥被提交，此位置不可用"
+
+    return {
+        "path": str(location.path),
+        "kind": location.kind,
+        "label": location.label,
+        "inside_project": location.inside_project,
+        "writable": writable,
+        "error": error,
+        "git_ignored": git_ignored,
+    }
+
+
+def resolve_config_location(refresh: bool = False) -> ConfigLocation:
+    """返回实际使用的配置位置（取第一个可写的候选），进程内缓存。"""
+    global _resolved_location
+
+    explicit = _explicit_location()
+    if explicit is not None:
+        return explicit
+
+    if _resolved_location is not None and not refresh:
+        return _resolved_location
+
+    locations = config_locations()
+    chosen = locations[0]  # 都不可写时保留首选，便于报出最有意义的错误
+    for location in locations:
+        if probe_location(location)["writable"]:
+            chosen = location
+            break
+
+    _resolved_location = chosen
+    return chosen
+
+
 def default_config_file() -> Path:
-    """配置文件路径（默认 ``~/.whatbird/config.json``）。"""
-    override = os.environ.get(CONFIG_FILE_ENV)
-    if override:
-        return Path(override).expanduser()
-    return default_config_dir() / "config.json"
+    """实际使用的配置文件路径（含位置降级）。"""
+    return resolve_config_location().path
+
+
+def config_file_status() -> dict[str, Any]:
+    """配置位置的完整状态，供 GUI / CLI / 排障使用。"""
+    global _resolved_location
+
+    locations = config_locations()
+    probes = [probe_location(location) for location in locations]
+
+    index = next((i for i, probe in enumerate(probes) if probe["writable"]), 0)
+    chosen, chosen_probe = locations[index], probes[index]
+    if _explicit_location() is None:
+        _resolved_location = chosen  # 与读取路径保持一致
+
+    preferred = probes[0]
+    is_fallback = Path(preferred["path"]) != Path(chosen_probe["path"])
+
+    warning: str | None = None
+    if chosen.kind == "project":
+        warning = (
+            "配置保存在项目目录内（git 已确认忽略，不会被提交）。"
+            "隔离性弱于用户目录，能写用户目录时建议优先用用户目录。"
+        )
+    elif is_fallback:
+        warning = f"首选位置不可写（{preferred['label']}），已自动改用{chosen.label}。"
+
+    return {
+        "path": chosen_probe["path"],
+        "exists": Path(chosen_probe["path"]).exists(),
+        "writable": chosen_probe["writable"],
+        "error": chosen_probe["error"],
+        "kind": chosen_probe["kind"],
+        "label": chosen_probe["label"],
+        "is_fallback": is_fallback,
+        "warning": warning,
+        "preferred_path": preferred["path"],
+        "candidates": probes,
+    }
 
 
 def mask_secret(value: str, *, keep: int = 4) -> str:
@@ -175,18 +371,46 @@ def load_config(path: str | os.PathLike[str] | None = None) -> ArkConfig:
     return ArkConfig.from_dict(raw.get(CONFIG_SECTION))
 
 
+def write_failure_hint(path: Path, detail: str) -> str:
+    """把写入失败的原因翻译成用户能照着做的几步。"""
+    return "\n".join(
+        [
+            f"系统返回：{detail}",
+            "可能的原因与处理办法：",
+            "  1) 程序运行在受限环境（沙箱 / 受限终端 / 受限权限的终端）中，只允许写特定目录"
+            " —— 请在普通终端里重新运行 whatbird serve；",
+            f'  2) 目标目录权限不足 —— 可先手动创建再重试：mkdir "{path.parent}"；',
+            "  3) 换一个可写位置：set WHATBIRD_CONFIG_FILE=D:\\whatbird\\config.json"
+            "（该环境变量只决定位置，不承载密钥）；",
+            "  4) 查看每个候选位置的可写情况：whatbird config doctor。",
+        ]
+    )
+
+
 def save_config(config: ArkConfig, path: str | os.PathLike[str] | None = None) -> Path:
     """校验并保存配置，返回写入的路径。
 
-    会拒绝把配置写进本仓库目录，避免密钥被 git 追踪。
+    默认位置由 :func:`resolve_config_location` 探测决定（首选用户目录，不可写时自动降级）。
+    显式传入路径时直接使用该路径，不做降级。
+
+    默认情况下拒绝把配置写进本仓库目录；唯一的例外是内部探测确认「该路径已被 git 忽略」
+    的项目内兜底位置 —— 此时「不会被提交」由 git 自己保证。
     """
     config.validate()
-    config_path = Path(path) if path is not None else default_config_file()
 
-    if _is_inside_project(config_path):
+    if path is not None:
+        config_path = Path(path)
+        allow_project_path = False
+    else:
+        location = resolve_config_location()
+        config_path = location.path
+        allow_project_path = location.inside_project
+
+    if _is_inside_project(config_path) and not (allow_project_path and git_ignores(config_path)):
         raise ConfigError(
             f"拒绝把 API 配置写入项目仓库内：{config_path}",
-            hint="配置必须与项目隔离；默认位置为 ~/.whatbird/config.json（可用 WHATBIRD_CONFIG_FILE 覆盖到仓库外）",
+            hint="配置必须与项目隔离；默认位置为 ~/.whatbird/config.json"
+            "（可用 WHATBIRD_CONFIG_FILE 指定其他仓库外的位置）",
         )
 
     payload = {
@@ -201,7 +425,10 @@ def save_config(config: ArkConfig, path: str | os.PathLike[str] | None = None) -
             encoding="utf-8",
         )
     except OSError as exc:
-        raise ConfigError(f"写入配置失败：{config_path}", hint=str(exc)) from exc
+        raise ConfigError(
+            f"无法写入配置文件：{config_path}",
+            hint=write_failure_hint(config_path, str(exc)),
+        ) from exc
 
     _harden_permissions(config_path)
     return config_path

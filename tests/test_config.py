@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -11,16 +13,44 @@ from whatbird.core.config import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     PROJECT_ROOT,
+    ConfigLocation,
+    config_file_status,
+    config_locations,
     default_config_file,
+    git_ignores,
     mask_secret,
+    probe_location,
+    resolve_config_location,
+    write_failure_hint,
 )
 
 
-def test_default_config_file_lives_outside_project():
-    """配置默认位置必须在仓库之外 —— 这是「不可能被提交」的根本保证。"""
-    path = default_config_file()
-    assert PROJECT_ROOT not in path.parents
-    assert path != PROJECT_ROOT
+def _clear_location_env(monkeypatch):
+    monkeypatch.delenv("WHATBIRD_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("WHATBIRD_CONFIG_DIR", raising=False)
+
+
+def test_all_config_candidates_stay_out_of_git(monkeypatch):
+    """配置位置要么在仓库之外，要么在仓库内但被 git 忽略 —— Agent.md 第 7 条。"""
+    _clear_location_env(monkeypatch)
+
+    locations = config_locations()
+    assert len(locations) >= 2
+
+    outside = [item for item in locations if not item.inside_project]
+    assert outside, "必须至少有一个仓库外的候选位置"
+    for item in outside:
+        assert PROJECT_ROOT not in item.path.parents
+        assert item.path != PROJECT_ROOT
+
+    inside = [item for item in locations if item.inside_project]
+    assert len(inside) == 1, "项目内兜底位置只能有一个"
+    assert git_ignores(inside[0].path), "项目内兜底位置必须被 .gitignore 覆盖"
+
+
+def test_default_config_file_follows_env_override():
+    """测试夹具用 WHATBIRD_CONFIG_FILE 重定向，必须严格生效且不做降级。"""
+    assert default_config_file() == Path(os.environ["WHATBIRD_CONFIG_FILE"])
 
 
 def test_missing_config_returns_defaults():
@@ -122,3 +152,112 @@ def test_saved_config_then_load_from_env(isolated_config):
     save_config(ArkConfig(api_key="sk-env"))
     assert isolated_config.exists()
     assert load_config().api_key == "sk-env"
+
+
+# ------------------------------------------------------- 位置探测与自动降级
+def test_probe_reports_unwritable_when_parent_is_a_file(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("我是文件，不是目录", encoding="utf-8")
+
+    probe = probe_location(ConfigLocation(blocker / "sub" / "config.json", "user", "坏位置"))
+
+    assert probe["writable"] is False
+    assert probe["error"]
+
+
+def test_probe_reports_writable_for_normal_dir(tmp_path):
+    probe = probe_location(ConfigLocation(tmp_path / "ok" / "config.json", "localappdata", "好位置"))
+    assert probe["writable"] is True
+    assert probe["error"] is None
+
+
+def test_resolution_falls_back_to_first_writable_candidate(tmp_path, monkeypatch):
+    """首选位置不可写时必须自动降级 —— 用户遇到的正是这个场景。"""
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file", encoding="utf-8")
+
+    bad = ConfigLocation(blocker / "sub" / "config.json", "user", "首选（不可写）")
+    good = ConfigLocation(tmp_path / "ok" / "config.json", "localappdata", "备用（可写）")
+    monkeypatch.setattr(config_module, "config_locations", lambda: [bad, good])
+    monkeypatch.setattr(config_module, "_resolved_location", None)
+
+    assert resolve_config_location(refresh=True).path == good.path
+
+
+def test_status_explains_why_it_fell_back(tmp_path, monkeypatch):
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file", encoding="utf-8")
+
+    bad = ConfigLocation(blocker / "sub" / "config.json", "user", "首选（不可写）")
+    good = ConfigLocation(tmp_path / "ok" / "config.json", "localappdata", "备用（可写）")
+    monkeypatch.setattr(config_module, "config_locations", lambda: [bad, good])
+    monkeypatch.setattr(config_module, "_resolved_location", None)
+
+    status = config_file_status()
+
+    assert status["path"] == str(good.path)
+    assert status["writable"] is True
+    assert status["is_fallback"] is True
+    assert "首选（不可写）" in status["warning"]
+    assert len(status["candidates"]) == 2
+
+
+def test_status_marks_everything_unwritable(tmp_path, monkeypatch):
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file", encoding="utf-8")
+    bad = ConfigLocation(blocker / "sub" / "config.json", "user", "唯一（不可写）")
+    monkeypatch.setattr(config_module, "config_locations", lambda: [bad])
+    monkeypatch.setattr(config_module, "_resolved_location", None)
+
+    status = config_file_status()
+
+    assert status["writable"] is False
+    assert status["error"]
+
+
+def test_project_fallback_requires_git_ignore():
+    """仓库内但未被 git 忽略的位置必须判定为不可用，否则密钥可能被提交。"""
+    not_ignored = ConfigLocation(
+        PROJECT_ROOT / "whatbird" / "config.json", "project", "仓库内未忽略", inside_project=True
+    )
+
+    probe = probe_location(not_ignored)
+
+    assert probe["writable"] is False
+    assert probe["git_ignored"] is False
+    assert "git" in (probe["error"] or "")
+
+
+def test_declared_project_fallback_is_actually_ignored(monkeypatch):
+    """兜底位置确实被 .gitignore 覆盖（与上一条互为对照）。"""
+    _clear_location_env(monkeypatch)
+    fallback = next(item for item in config_locations() if item.inside_project)
+    assert git_ignores(fallback.path) is True
+
+
+# ------------------------------------------------------------------ 失败提示
+def test_save_failure_hint_is_actionable(tmp_path):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as excinfo:
+        save_config(ArkConfig(api_key="sk-x"), blocker / "sub" / "config.json")
+
+    hint = excinfo.value.hint
+    assert "普通终端" in hint
+    assert "WHATBIRD_CONFIG_FILE" in hint
+    assert "config doctor" in hint
+
+
+def test_write_failure_hint_mentions_the_directory(tmp_path):
+    hint = write_failure_hint(tmp_path / "a" / "config.json", "PermissionError: 拒绝访问")
+    assert str(tmp_path / "a") in hint

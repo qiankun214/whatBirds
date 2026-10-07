@@ -40,7 +40,7 @@ from ..core import (
     ModelCallError,
     ResponseParseError,
     WhatBirdError,
-    default_config_file,
+    config_file_status,
     load_config,
     save_config,
 )
@@ -156,13 +156,23 @@ def create_app() -> FastAPI:
     # ----------------------------------------------------------- 配置
     @app.get("/api/config", tags=["config"])
     def get_config() -> dict[str, Any]:
-        """给配置向导用的完整状态：当前值（脱敏）、默认值、配置文件位置。"""
+        """给配置向导用的完整状态：当前值（脱敏）、默认值、配置文件位置与可写性。"""
         config = load_config()
-        config_file = default_config_file()
+        status = config_file_status()
         return {
             "config": config.masked_dict(),
-            "config_file": str(config_file),
-            "config_file_exists": config_file.exists(),
+            "config_file": status["path"],
+            "config_file_exists": status["exists"],
+            "config_writable": status["writable"],
+            "config_file_error": status["error"],
+            "config_location": {
+                "kind": status["kind"],
+                "label": status["label"],
+                "is_fallback": status["is_fallback"],
+                "warning": status["warning"],
+                "preferred_path": status["preferred_path"],
+                "candidates": status["candidates"],
+            },
             "defaults": ArkConfig().to_dict(),
             "api_key_masked": True,
         }
@@ -171,9 +181,17 @@ def create_app() -> FastAPI:
     def put_config(payload: ConfigUpdate) -> dict[str, Any]:
         updated = merge_config_update(load_config(), payload)
         path = save_config(updated)
+        status = config_file_status()
         return {
             "config": updated.masked_dict(),
             "config_file": str(path),
+            "config_writable": status["writable"],
+            "config_location": {
+                "kind": status["kind"],
+                "label": status["label"],
+                "is_fallback": status["is_fallback"],
+                "warning": status["warning"],
+            },
             "message": "配置已保存，后续调用立即生效",
         }
 

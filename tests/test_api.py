@@ -138,14 +138,28 @@ def test_put_config_rejects_invalid_values(client):
 
 # ------------------------------------------------------- 配置向导：草稿验证
 def test_config_payload_covers_the_whole_wizard_form(client):
-    """向导需要当前值、默认值与配置文件位置，接口要一次给全。"""
+    """向导需要当前值、默认值、配置文件位置与可写性，接口要一次给全。"""
     body = client.get("/api/config").json()
     assert isinstance(body["config_file_exists"], bool)
     assert body["config_file"]
+    assert isinstance(body["config_writable"], bool)
+    assert body["config_location"]["label"]
+    assert isinstance(body["config_location"]["candidates"], list)
 
     defaults = body["defaults"]
     for key in ("base_url", "model", "timeout", "max_tokens", "temperature", "max_image_side", "jpeg_quality"):
         assert key in defaults, key
+
+
+def test_save_response_reports_where_it_went(client):
+    """保存后必须告诉用户真实落盘位置与位置类型，便于排查受限环境。"""
+    response = client.put("/api/config", json={"api_key": "sk-1234567890"}, headers=HEADERS)
+
+    body = response.json()
+    assert response.status_code == 200
+    assert body["config_file"].endswith("config.json")
+    assert body["config_writable"] is True
+    assert body["config_location"]["label"]
 
 
 def test_verify_requires_client_header(client):

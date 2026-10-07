@@ -17,6 +17,7 @@ import argparse
 import getpass
 import json
 import sys
+from pathlib import Path
 from typing import Any, Sequence
 
 from . import __version__
@@ -25,11 +26,17 @@ from .core import (
     BirdIdentification,
     ConfigError,
     WhatBirdError,
+    config_file_status,
     default_config_file,
     load_config,
     save_config,
 )
-from .core.config import CONFIG_DIR_ENV, DEFAULT_BASE_URL, DEFAULT_MODEL
+from .core.config import (
+    CONFIG_DIR_ENV,
+    DEFAULT_BASE_URL,
+    DEFAULT_MODEL,
+    write_failure_hint,
+)
 from .core.recognizer import BirdRecognizer
 
 
@@ -129,15 +136,22 @@ def cmd_config_set(args: argparse.Namespace) -> int:
         jpeg_quality=args.jpeg_quality,
     )
     path = save_config(config)
+    status = config_file_status()
     print(f"配置已保存：{path}")
+    print(f"  位置：{status['label']}｜{'可写' if status['writable'] else '不可写'}")
+    if status["warning"]:
+        print(f"  提示：{status['warning']}")
     _print_masked(config)
     return 0
 
 
 def cmd_config_show(args: argparse.Namespace) -> int:
     config = load_config()
-    path = default_config_file()
-    print(f"配置文件：{path}（{'已存在' if path.exists() else '尚未创建'}）")
+    status = config_file_status()
+    print(f"配置文件：{status['path']}（{'已存在' if status['exists'] else '尚未创建'}）")
+    print(f"  位置：{status['label']}｜{'可写' if status['writable'] else '不可写'}")
+    if status["warning"]:
+        print(f"  提示：{status['warning']}")
     if args.show_key:
         if not config.configured:
             print("API Key：未配置")
@@ -150,6 +164,34 @@ def cmd_config_show(args: argparse.Namespace) -> int:
 
 def cmd_config_path(_: argparse.Namespace) -> int:
     print(default_config_file())
+    return 0
+
+
+def cmd_config_doctor(_: argparse.Namespace) -> int:
+    """排查「配置存不下来」：逐个候选位置真实试写并报告。"""
+    status = config_file_status()
+
+    print("配置位置候选（按优先级，逐个真实试写）：")
+    for index, candidate in enumerate(status["candidates"], start=1):
+        mark = "√" if candidate["writable"] else "×"
+        print(f"  {mark} {index}. {candidate['path']}")
+        print(f"        {candidate['label']}")
+        if candidate["writable"]:
+            if candidate["git_ignored"] is not None:
+                print("        git 已忽略：是")
+        else:
+            print(f"        不可写：{candidate['error']}")
+
+    print()
+    print(f"最终使用：{status['path']}")
+    print(f"  位置：{status['label']}")
+    print(f"  已存在：{'是' if status['exists'] else '否'}")
+    if status["warning"]:
+        print(f"  提示：{status['warning']}")
+
+    if not status["writable"]:
+        print()
+        print(write_failure_hint(Path(status["path"]), status["error"] or "未知原因"))
     return 0
 
 
@@ -243,6 +285,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     path_parser = config_sub.add_parser("path", help="打印配置文件位置")
     path_parser.set_defaults(handler=cmd_config_path)
+
+    doctor_parser = config_sub.add_parser(
+        "doctor",
+        help="排查配置写入失败：逐个候选位置试写并给出处理办法",
+    )
+    doctor_parser.set_defaults(handler=cmd_config_doctor)
 
     verify_parser = config_sub.add_parser("verify", help="验证配置能否成功调用方舟")
     verify_parser.set_defaults(handler=cmd_config_verify)

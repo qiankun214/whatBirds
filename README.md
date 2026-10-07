@@ -89,11 +89,21 @@ python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirement
 
 ## 3. 配置 API（一次配置，长期有效）
 
-配置**只**保存在用户主目录，与项目完全隔离，**不会被提交到 git**
-（`~/.whatbird/` 在仓库之外，且 `.gitignore` 另有兜底规则）：
+### 配置存放在哪里
 
-```
-~/.whatbird/config.json
+程序启动时会**真实试写**探测各候选位置，取第一个可写的（界面与 `config doctor` 都会显示结果）：
+
+1. `~/.whatbird/config.json` —— 首选，完全在仓库之外；
+2. `%LOCALAPPDATA%\WhatBird\config.json`；
+3. `%APPDATA%\WhatBird\config.json`；
+4. `<项目>\.whatbird\config.json` —— 仅当前三个都不可写（受限沙箱 / 受限终端 / 安全软件）时启用。
+   它虽然在仓库内，但**必须通过 `git check-ignore` 校验**才会被采用，
+   所以「不会被提交到 git」由 git 本身保证，而不是靠约定。
+
+不是首选位置时，界面和命令行都会明确提示当前用的是哪个位置。
+
+```bash
+python -m whatbird.cli config doctor    # 逐个候选位置真实试写，排查「保存失败」
 ```
 
 配置入口有两个，读写的是**同一份文件**，效果完全相同。
@@ -137,8 +147,9 @@ python -m whatbird.cli config set ^
 查看 / 校验：
 
 ```bash
-python -m whatbird.cli config show      # 默认脱敏显示
+python -m whatbird.cli config show      # 默认脱敏显示（含配置文件位置与可写性）
 python -m whatbird.cli config path      # 配置文件位置
+python -m whatbird.cli config doctor    # 逐个候选位置试写，排查「保存失败」
 python -m whatbird.cli config verify    # 真的调一次模型，验证 Key/模型是否可用
 ```
 
@@ -219,7 +230,7 @@ python -m whatbird.cli serve --port 8000
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 + 是否已配置 |
-| GET | `/api/config` | 读取配置（Key 脱敏）+ 高级参数默认值 + 配置文件位置 |
+| GET | `/api/config` | 读取配置（Key 脱敏）+ 参数默认值 + 位置与可写性 |
 | PUT | `/api/config` | 写入配置 |
 | POST | `/api/config/verify` | 测试连接；请求体可带「草稿」参数，**只测不存** |
 | POST | `/api/recognize` | 上传图片识别（multipart） |
@@ -264,6 +275,7 @@ python -m pytest
 
 | 现象 | 原因与处理 |
 | --- | --- |
+| 保存配置报「拒绝访问 / WinError 5」 | 程序被限制写用户目录（受限沙箱、受限终端或安全软件）。程序会**自动降级**到第一个可写位置并在界面提示；若仍失败，请在普通终端里重新运行 `whatbird serve`，或用 `WHATBIRD_CONFIG_FILE` 指定可写位置。先跑 `python -m whatbird.cli config doctor` 看每个位置的具体原因 |
 | `HTTP 401 鉴权失败` | API Key 不对或失效，重新 `config set` |
 | `HTTP 404 模型或接入点不存在` | `model` 填错：应填控制台 Model ID 或 `ep-xxxxxxxx` 接入点 ID |
 | `HTTP 400 请求被方舟拒绝` | 常见于模型不支持图片输入、图片过大 |

@@ -26,6 +26,8 @@
     maskedKey: "",
     configFile: "",
     configFileExists: false,
+    configWritable: true,
+    location: null,
     config: null,
     defaults: null,
     step: 1,
@@ -92,12 +94,14 @@
       state.config = config;
       state.configFile = data.config_file || "";
       state.configFileExists = !!data.config_file_exists;
+      state.configWritable = data.config_writable !== false;
+      state.location = data.config_location || null;
       state.defaults = data.defaults || null;
 
       $("wz-config-file").textContent = state.configFile || "—";
-      $("footer-config").textContent = state.configFileExists
-        ? "配置文件：" + state.configFile
-        : "尚未创建配置文件（保存后写入 " + (state.configFile || "~/.whatbird/config.json") + "）";
+      $("footer-config").textContent =
+        (state.configFileExists ? "配置文件：" : "配置文件（尚未创建）：") + state.configFile +
+        (state.location && state.location.label ? "｜" + state.location.label : "");
 
       if (state.configured) {
         pill.textContent = "已配置 · " + (config.model || "");
@@ -205,7 +209,28 @@
     if (!silent) { setMessage($("wz-msg"), ""); setMessage($("wz-result"), ""); }
 
     if (state.step === 2) { keyHint(); }
-    if (state.step === 4) { renderSummary(); }
+    if (state.step === 4) { renderSummary(); renderLocationWarning(); }
+  }
+
+  function renderLocationWarning() {
+    var box = $("wz-location-warning");
+    if (!state.configWritable) {
+      setMessage(
+        box,
+        "当前所有候选配置位置都不可写，直接保存会失败。\n" +
+        "处理办法：在普通（非受限）终端里重新运行 whatbird serve；" +
+        "或用环境变量指定一个可写位置：" +
+        "set WHATBIRD_CONFIG_FILE=D:\\whatbird\\config.json\n" +
+        "也可以在命令行运行 whatbird config doctor 查看每个位置的具体原因。",
+        "error"
+      );
+      return;
+    }
+    if (state.location && state.location.warning) {
+      setMessage(box, state.location.warning, "warn");
+      return;
+    }
+    setMessage(box, "");
   }
 
   function validateIdentity() {
@@ -239,6 +264,9 @@
       ["temperature", draft.temperature !== null ? draft.temperature : "（默认）"],
       ["图片最长边", draft.max_image_side !== null ? draft.max_image_side + " px" : "（默认）"],
       ["JPEG 质量", draft.jpeg_quality !== null ? draft.jpeg_quality : "（默认）"],
+      ["位置类型", state.location
+        ? state.location.label + (state.location.is_fallback ? "（自动降级）" : "")
+        : "（默认）"],
       ["保存位置", state.configFile || "（默认用户目录）"]
     ];
 
@@ -299,14 +327,18 @@
       });
       state.saved = true;
       await loadConfig();
+      var extra = state.location && state.location.warning
+        ? "\n说明：" + state.location.warning
+        : "";
       setMessage(
         $("wz-result"),
         "✓ " + (data.message || "配置已保存") + "\n文件位置：" + (data.config_file || state.configFile) +
-        "\n现在就可以回到主界面开始识别了。",
+        extra + "\n现在就可以回到主界面开始识别了。",
         "ok"
       );
       $("wz-next").textContent = "完成";
       renderSummary();
+      renderLocationWarning();
     } catch (err) {
       setMessage($("wz-result"), "✗ 保存失败：" + err.message, "error");
     } finally {

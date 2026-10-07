@@ -3,7 +3,9 @@
 # ============================================================
 # 说明：真实的 API 配置默认写在用户主目录（~/.whatbird/config.json），
 # 物理上不在本仓库内，因此不可能被提交。以下规则是额外的兜底保护：
-# 一旦有人把配置复制进仓库，git 也会忽略它。
+# 一旦配置被放到仓库内（受限环境下 app 会降级到 .whatbird/，
+# 且该降级以 `git check-ignore` 通过为前提），git 也必须忽略它。
+.whatbird/
 config/settings.json
 config/config.json
 config/*.local.json
