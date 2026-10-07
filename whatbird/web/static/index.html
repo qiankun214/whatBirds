@@ -208,6 +208,14 @@
         <!-- 步骤 4 -->
         <section data-step="4" hidden>
           <div id="wz-location-warning" class="alert alert-warn" hidden></div>
+          <div id="wz-consent" class="consent" hidden>
+            <label class="checkbox">
+              <input id="wz-allow-project" type="checkbox" />
+              <span>我同意在用户目录不可写时，把 API 配置保存到项目内位置
+                <code id="wz-project-path">—</code>
+                —— 该文件已被 <code>.gitignore</code> 忽略，不会被提交到 git</span>
+            </label>
+          </div>
           <dl class="summary" id="wz-summary"></dl>
           <div class="row-actions">
             <button id="wz-verify" class="btn" type="button">测试连接</button>

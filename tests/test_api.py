@@ -152,6 +152,38 @@ def test_config_payload_covers_the_whole_wizard_form(client):
         assert key in defaults, key
 
 
+def test_config_payload_exposes_consent_state(client):
+    """向导要靠这两个字段决定是否显示「同意使用项目内位置」的勾选框。"""
+    location = client.get("/api/config").json()["config_location"]
+    assert "needs_consent" in location
+    assert "project_candidate" in location
+
+
+def test_put_config_accepts_consent_flag(client):
+    """同意开关是控制项，不能被当成配置字段（否则会报「未知配置项」）。"""
+    response = client.put(
+        "/api/config",
+        json={"api_key": "sk-1234567890", "allow_project_fallback": True},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["config"]["configured"] is True
+    assert "needs_consent" in response.json()["config_location"]
+
+
+def test_verify_ignores_consent_flag(client):
+    client.put("/api/config", json={"api_key": "sk-saved-123456"}, headers=HEADERS)
+
+    response = client.post(
+        "/api/config/verify",
+        json={"allow_project_fallback": True},
+        headers=HEADERS,
+    )
+
+    assert response.status_code == 200
+
+
 def test_save_response_reports_where_it_went(client):
     """保存后必须告诉用户真实落盘位置与位置类型，便于排查受限环境。"""
     response = client.put("/api/config", json={"api_key": "sk-1234567890"}, headers=HEADERS)

@@ -28,6 +28,9 @@
     configFileExists: false,
     loadedFrom: null,
     configWritable: true,
+    needsConsent: false,
+    projectCandidate: null,
+    busy: false,
     location: null,
     config: null,
     defaults: null,
@@ -98,6 +101,8 @@
       state.loadedFrom = data.config_loaded_from || null;
       state.configWritable = data.config_writable !== false;
       state.location = data.config_location || null;
+      state.needsConsent = !!(state.location && state.location.needs_consent);
+      state.projectCandidate = (state.location && state.location.project_candidate) || null;
       state.defaults = data.defaults || null;
 
       $("wz-config-file").textContent = state.configFile || "—";
@@ -158,7 +163,8 @@
       max_tokens: numberOrNull("cfg-max-tokens", true),
       temperature: numberOrNull("cfg-temperature", false),
       max_image_side: numberOrNull("cfg-max-side", true),
-      jpeg_quality: numberOrNull("cfg-jpeg-quality", true)
+      jpeg_quality: numberOrNull("cfg-jpeg-quality", true),
+      allow_project_fallback: $("wz-allow-project").checked
     };
   }
 
@@ -211,7 +217,15 @@
     if (!silent) { setMessage($("wz-msg"), ""); setMessage($("wz-result"), ""); }
 
     if (state.step === 2) { keyHint(); }
-    if (state.step === 4) { renderSummary(); renderLocationWarning(); }
+    if (state.step === 4) { renderSummary(); renderLocationWarning(); renderConsent(); }
+  }
+
+  function renderConsent() {
+    var project = state.projectCandidate || {};
+    $("wz-consent").hidden = !state.needsConsent;
+    $("wz-project-path").textContent = project.path || "（项目内 .whatbird/config.json）";
+    if (!state.needsConsent) { $("wz-allow-project").checked = false; }
+    updateSaveState();
   }
 
   function renderLocationWarning() {
@@ -219,6 +233,21 @@
     var migrated = state.loadedFrom && state.loadedFrom !== state.configFile
       ? "\n现有配置读取自 " + state.loadedFrom + "；下次保存会写入上面的新位置。"
       : "";
+
+    if (state.needsConsent) {
+      var project = state.projectCandidate || {};
+      var reason = state.location && state.location.preferred_error
+        ? "（" + state.location.preferred_error + "）"
+        : "";
+      setMessage(
+        box,
+        "用户级配置位置都不可写" + reason + "。\n" +
+        "程序不会自动把密钥放进项目里。若你同意，可以保存到：" + (project.path || "-") + "\n" +
+        "该文件已被 .gitignore 忽略，不会被提交到 git；勾选下方复选框后才能保存。" + migrated,
+        "warn"
+      );
+      return;
+    }
 
     if (!state.configWritable) {
       setMessage(
@@ -234,13 +263,13 @@
     }
 
     if (state.location && state.location.is_fallback) {
-      var reason = state.location.preferred_error
+      var why = state.location.preferred_error
         ? "\n首选位置 " + state.location.preferred_path + " 写入被系统拒绝：" + state.location.preferred_error
         : "";
       setMessage(
         box,
         "当前使用：" + state.location.label + "\n" +
-        (state.location.warning || "") + reason + migrated +
+        (state.location.warning || "") + why + migrated +
         "\n若想让密钥完全放在项目之外，请在普通终端里运行 whatbird serve" +
         "（每次启动都会重新检测，可写时会自动切回用户目录），" +
         "或用环境变量指定位置：set WHATBIRD_CONFIG_FILE=D:\\whatbird\\config.json",
@@ -283,9 +312,11 @@
       ["temperature", draft.temperature !== null ? draft.temperature : "（默认）"],
       ["图片最长边", draft.max_image_side !== null ? draft.max_image_side + " px" : "（默认）"],
       ["JPEG 质量", draft.jpeg_quality !== null ? draft.jpeg_quality : "（默认）"],
-      ["位置类型", state.location
-        ? state.location.label + (state.location.is_fallback ? "（自动降级）" : "")
-        : "（默认）"],
+      ["位置类型", state.needsConsent
+        ? "用户级位置不可写（需勾选同意后才用项目内位置）"
+        : (state.location
+          ? state.location.label + (state.location.is_fallback ? "（降级）" : "")
+          : "（默认）")],
       ["保存位置", state.configFile || "（默认用户目录）"]
     ];
 
@@ -304,11 +335,18 @@
   }
 
   function setBusy(busy) {
-    $("wz-verify").disabled = busy;
-    $("wz-save").disabled = busy;
-    $("wz-recheck").disabled = busy;
-    $("wz-next").disabled = busy;
-    $("wz-prev").disabled = busy;
+    state.busy = busy;
+    ["wz-verify", "wz-recheck", "wz-next", "wz-prev"].forEach(function (id) {
+      $(id).disabled = busy;
+    });
+    updateSaveState();
+  }
+
+  function updateSaveState() {
+    // 需要同意才能保存时，勾选框没打勾就不让点保存（避免点了才报错）
+    var blocked = state.needsConsent && !$("wz-allow-project").checked;
+    $("wz-save").disabled = state.busy || blocked;
+    $("wz-save").title = blocked ? "请先勾选同意，或改用可写的用户目录" : "";
   }
 
   async function recheckLocation() {
@@ -426,6 +464,10 @@
     $("wz-verify").addEventListener("click", verifyDraft);
     $("wz-save").addEventListener("click", saveFromWizard);
     $("wz-recheck").addEventListener("click", recheckLocation);
+    $("wz-allow-project").addEventListener("change", function () {
+      updateSaveState();
+      renderLocationWarning();
+    });
   }
 
   // ------------------------------------------------------------ 结果渲染

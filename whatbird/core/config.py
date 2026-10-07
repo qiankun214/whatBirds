@@ -25,11 +25,15 @@
 1. ``~/.whatbird/config.json``                用户目录（首选，隔离性最好）
 2. ``%LOCALAPPDATA%\\WhatBird\\config.json``   本机应用数据目录
 3. ``%APPDATA%\\WhatBird\\config.json``        漫游应用数据目录
-4. ``<项目>/.whatbird/config.json``            最后兜底：位于仓库内，**只有在 git 确认已忽略它时才允许使用**
+4. ``<项目>/.whatbird/config.json``            仓库内的兜底位置，**必须显式同意才会使用**
 
-第 4 项是为了兼容「进程只能写工作区」这类受限环境；它是否可用由 ``git check-ignore``
-实时判定，因此 Agent.md 第 7 条「不能被提交到 git 上」仍然由 git 本身强制保证。
-无论最终用哪个位置，界面与 CLI 都会显示真实路径，并在不是首选位置时给出提示。
+第 4 项有三重限制，避免密钥被悄悄放进项目：
+
+- 必须由用户显式同意（GUI 勾选框 / CLI 开关 / ``WHATBIRD_ALLOW_PROJECT_CONFIG=1``），
+  默认**不会**自动降级到这里；
+- 必须通过 ``git check-ignore`` 校验，「不会被提交到 git」由 git 本身保证；
+- 无论是否使用它，界面与 CLI 都会显示真实路径、首选位置为何不可写，
+  并且**读取**时仍会去这些位置查找，位置变化不会让已配置的内容凭空消失。
 """
 
 from __future__ import annotations
@@ -65,7 +69,25 @@ CONFIG_FILE_NAME = "config.json"
 #: 项目内兜底目录名（只有在 git 确认忽略时才允许使用）
 PROJECT_FALLBACK_DIR = ".whatbird"
 
-_resolved_location: "ConfigLocation | None" = None
+#: 显式同意把配置放进项目内兜底位置的环境变量
+CONSENT_ENV = "WHATBIRD_ALLOW_PROJECT_CONFIG"
+
+#: 位置缓存：键是「是否已获得项目内兜底的同意」
+_resolved_cache: dict[bool, "ConfigLocation"] = {}
+
+
+def project_consent_granted(explicit: bool | None = None) -> bool:
+    """是否同意把配置写入项目内兜底位置。
+
+    默认**不**自动降级到项目内 —— 必须由用户显式同意，来源有三：
+    1. 调用方直接传入 ``explicit=True``（GUI 勾选框 / CLI 开关）；
+    2. 环境变量 ``WHATBIRD_ALLOW_PROJECT_CONFIG=1``；
+    3. 其他来源都不可写时，界面/命令行会明确询问。
+    """
+    if explicit is not None:
+        return bool(explicit)
+    value = os.environ.get(CONSENT_ENV, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -189,25 +211,38 @@ def probe_location(location: ConfigLocation) -> dict[str, Any]:
     }
 
 
-def resolve_config_location(refresh: bool = False) -> ConfigLocation:
-    """返回实际使用的配置位置（取第一个可写的候选），进程内缓存。"""
-    global _resolved_location
+def resolve_config_location(
+    refresh: bool = False,
+    *,
+    allow_project: bool | None = None,
+) -> ConfigLocation:
+    """返回实际使用的配置位置（取第一个可写且被允许的候选），按同意状态缓存。
 
-    explicit = _explicit_location()
-    if explicit is not None:
-        return explicit
+    注意：项目内兜底位置只有在 :func:`project_consent_granted` 为真时才参与写入；
+    未获同意时它会退回到首选位置，于是保存会失败并给出可操作的提示，而不是偷偷降级。
+    """
+    explicit_location = _explicit_location()
+    if explicit_location is not None:
+        return explicit_location
 
-    if _resolved_location is not None and not refresh:
-        return _resolved_location
+    consent = project_consent_granted(allow_project)
+    if not refresh and consent in _resolved_cache:
+        return _resolved_cache[consent]
 
     locations = config_locations()
+    usable = [
+        location
+        for location in locations
+        if not location.inside_project or consent
+    ]
+
     chosen = locations[0]  # 都不可写时保留首选，便于报出最有意义的错误
-    for location in locations:
+    for location in usable:
         if probe_location(location)["writable"]:
             chosen = location
             break
 
-    _resolved_location = chosen
+    _resolved_cache[consent] = chosen
     return chosen
 
 
@@ -235,29 +270,47 @@ def existing_config_file() -> Path | None:
     return None
 
 
-def config_file_status() -> dict[str, Any]:
+def config_file_status(*, allow_project: bool | None = None) -> dict[str, Any]:
     """配置位置的完整状态，供 GUI / CLI / 排障使用。"""
-    global _resolved_location
-
     locations = config_locations()
     probes = [probe_location(location) for location in locations]
+    consent = project_consent_granted(allow_project)
 
-    index = next((i for i, probe in enumerate(probes) if probe["writable"]), 0)
-    chosen, chosen_probe = locations[index], probes[index]
+    eligible = [
+        (location, probe)
+        for location, probe in zip(locations, probes)
+        if probe["writable"] and (not location.inside_project or consent)
+    ]
+    if eligible:
+        chosen, chosen_probe = eligible[0]
+    else:
+        chosen, chosen_probe = locations[0], probes[0]
+
     if _explicit_location() is None:
-        _resolved_location = chosen  # 与读取路径保持一致
+        _resolved_cache[consent] = chosen  # 与读取路径保持一致
 
     preferred = probes[0]
     is_fallback = Path(preferred["path"]) != Path(chosen_probe["path"])
 
+    project_probe = next(
+        (probe for location, probe in zip(locations, probes) if location.inside_project),
+        None,
+    )
+    outside_writable = any(
+        probe["writable"] for location, probe in zip(locations, probes) if not location.inside_project
+    )
+    needs_consent = bool(
+        not consent and not outside_writable and project_probe and project_probe["writable"]
+    )
+
     warning: str | None = None
     if chosen.kind == "project":
         warning = (
-            "配置保存在项目目录内（git 已确认忽略，不会被提交）。"
+            "配置保存在项目目录内（已获你同意；git 已确认忽略，不会被提交）。"
             "隔离性弱于用户目录，能写用户目录时建议优先用用户目录。"
         )
     elif is_fallback:
-        warning = f"首选位置不可写（{preferred['label']}），已自动改用{chosen.label}。"
+        warning = f"首选位置不可写（{preferred['label']}），已改用{chosen.label}。"
 
     return {
         "path": chosen_probe["path"],
@@ -268,6 +321,8 @@ def config_file_status() -> dict[str, Any]:
         "kind": chosen_probe["kind"],
         "label": chosen_probe["label"],
         "is_fallback": is_fallback,
+        "needs_consent": needs_consent,
+        "project_candidate": project_probe,
         "warning": warning,
         "preferred_path": preferred["path"],
         "preferred_error": preferred["error"] if not preferred["writable"] else None,
@@ -420,14 +475,20 @@ def write_failure_hint(path: Path, detail: str) -> str:
     )
 
 
-def save_config(config: ArkConfig, path: str | os.PathLike[str] | None = None) -> Path:
+def save_config(
+    config: ArkConfig,
+    path: str | os.PathLike[str] | None = None,
+    *,
+    allow_project: bool | None = None,
+) -> Path:
     """校验并保存配置，返回写入的路径。
 
-    默认位置由 :func:`resolve_config_location` 探测决定（首选用户目录，不可写时自动降级）。
-    显式传入路径时直接使用该路径，不做降级。
+    默认位置由 :func:`resolve_config_location` 探测决定（首选用户目录，不可写时依次尝试
+    其他用户级目录）。**不会**自动把配置放进项目目录 —— 必须显式同意
+    （``allow_project=True`` 或环境变量 ``WHATBIRD_ALLOW_PROJECT_CONFIG=1``）。
 
-    默认情况下拒绝把配置写进本仓库目录；唯一的例外是内部探测确认「该路径已被 git 忽略」
-    的项目内兜底位置 —— 此时「不会被提交」由 git 自己保证。
+    显式传入路径时直接使用该路径，不做降级；此时若路径位于仓库内仍会被拒绝，
+    除非它同时通过 ``git check-ignore`` 校验。
     """
     config.validate()
 
@@ -435,7 +496,7 @@ def save_config(config: ArkConfig, path: str | os.PathLike[str] | None = None) -
         config_path = Path(path)
         allow_project_path = False
     else:
-        location = resolve_config_location()
+        location = resolve_config_location(allow_project=allow_project)
         config_path = location.path
         allow_project_path = location.inside_project
 
@@ -443,7 +504,9 @@ def save_config(config: ArkConfig, path: str | os.PathLike[str] | None = None) -
         raise ConfigError(
             f"拒绝把 API 配置写入项目仓库内：{config_path}",
             hint="配置必须与项目隔离；默认位置为 ~/.whatbird/config.json"
-            "（可用 WHATBIRD_CONFIG_FILE 指定其他仓库外的位置）",
+            "（可用 WHATBIRD_CONFIG_FILE 指定其他仓库外的位置）。"
+            "如果确实要把配置放进项目内兜底位置，请显式同意："
+            f"设置 {CONSENT_ENV}=1，或在界面/CLI 上使用对应的同意开关。",
         )
 
     payload = {
@@ -458,10 +521,16 @@ def save_config(config: ArkConfig, path: str | os.PathLike[str] | None = None) -
             encoding="utf-8",
         )
     except OSError as exc:
-        raise ConfigError(
-            f"无法写入配置文件：{config_path}",
-            hint=write_failure_hint(config_path, str(exc)),
-        ) from exc
+        hint = write_failure_hint(config_path, str(exc))
+        status = config_file_status()
+        if status["needs_consent"]:
+            project_path = (status["project_candidate"] or {}).get("path", "")
+            hint += (
+                f"\n  5) 本机可用的项目内位置（已被 git 忽略，不会被提交）：{project_path}\n"
+                f"     若同意把配置放在那里，请显式同意：加 --allow-project-config，"
+                f"或设置 {CONSENT_ENV}=1；网页端在第 4 步勾选同意即可。"
+            )
+        raise ConfigError(f"无法写入配置文件：{config_path}", hint=hint) from exc
 
     _harden_permissions(config_path)
     return config_path

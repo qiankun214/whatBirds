@@ -96,9 +96,16 @@ python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirement
 1. `~/.whatbird/config.json` —— 首选，完全在仓库之外；
 2. `%LOCALAPPDATA%\WhatBird\config.json`；
 3. `%APPDATA%\WhatBird\config.json`；
-4. `<项目>\.whatbird\config.json` —— 仅当前三个都不可写（受限沙箱 / 受限终端 / 安全软件）时启用。
-   它虽然在仓库内，但**必须通过 `git check-ignore` 校验**才会被采用，
-   所以「不会被提交到 git」由 git 本身保证，而不是靠约定。
+4. `<项目>\.whatbird\config.json` —— 仓库内的兜底位置，**必须由你显式同意才会使用**。
+
+第 4 项有三重限制，避免密钥被悄悄放进项目：
+
+- **默认不自动降级**。需要显式同意：向导第 4 步勾选「同意使用项目内位置」，
+  或命令行 `whatbird config set --allow-project-config ...`，
+  或设置环境变量 `WHATBIRD_ALLOW_PROJECT_CONFIG=1`；
+- 必须通过 `git check-ignore` 校验才会启用，所以「不会被提交到 git」由 git 本身保证；
+- **读取**不受影响：已经存在别处的配置仍会被读到（界面/CLI 会显示「当前读取自」），
+  位置变化不会让你重填 Key。
 
 不是首选位置时，界面和命令行都会明确提示当前用的是哪个位置、以及首选位置**为什么不可写**。
 
@@ -278,7 +285,7 @@ python -m pytest
 
 | 现象 | 原因与处理 |
 | --- | --- |
-| 保存配置报「拒绝访问 / WinError 5」 | 程序被限制写用户目录（受限沙箱、受限终端或安全软件）。程序会**自动降级**到第一个可写位置并在界面提示；若仍失败，请在普通终端里重新运行 `whatbird serve`，或用 `WHATBIRD_CONFIG_FILE` 指定可写位置。先跑 `python -m whatbird.cli config doctor` 看每个位置的具体原因 |
+| 保存配置报「拒绝访问 / WinError 5」 | 程序被限制写用户目录（受限沙箱、受限终端或安全软件）。程序**不会自动**把配置放进项目里；向导第 4 步会给出可写位置并请你确认同意。先跑 `python -m whatbird.cli config doctor` 看每个位置的具体原因 |
 | `HTTP 401 鉴权失败` | API Key 不对或失效，重新 `config set` |
 | `HTTP 404 模型或接入点不存在` | `model` 填错：应填控制台 Model ID 或 `ep-xxxxxxxx` 接入点 ID |
 | `HTTP 400 请求被方舟拒绝` | 常见于模型不支持图片输入、图片过大 |

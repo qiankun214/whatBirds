@@ -10,6 +10,7 @@ import pytest
 
 from whatbird.core import ArkConfig, ConfigError, load_config, save_config
 from whatbird.core.config import (
+    CONSENT_ENV,
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     PROJECT_ROOT,
@@ -20,6 +21,7 @@ from whatbird.core.config import (
     git_ignores,
     mask_secret,
     probe_location,
+    project_consent_granted,
     resolve_config_location,
     write_failure_hint,
 )
@@ -182,7 +184,7 @@ def test_resolution_falls_back_to_first_writable_candidate(tmp_path, monkeypatch
     bad = ConfigLocation(blocker / "sub" / "config.json", "user", "首选（不可写）")
     good = ConfigLocation(tmp_path / "ok" / "config.json", "localappdata", "备用（可写）")
     monkeypatch.setattr(config_module, "config_locations", lambda: [bad, good])
-    monkeypatch.setattr(config_module, "_resolved_location", None)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
 
     assert resolve_config_location(refresh=True).path == good.path
 
@@ -197,7 +199,7 @@ def test_status_explains_why_it_fell_back(tmp_path, monkeypatch):
     bad = ConfigLocation(blocker / "sub" / "config.json", "user", "首选（不可写）")
     good = ConfigLocation(tmp_path / "ok" / "config.json", "localappdata", "备用（可写）")
     monkeypatch.setattr(config_module, "config_locations", lambda: [bad, good])
-    monkeypatch.setattr(config_module, "_resolved_location", None)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
 
     status = config_file_status()
 
@@ -216,7 +218,7 @@ def test_status_marks_everything_unwritable(tmp_path, monkeypatch):
     blocker.write_text("file", encoding="utf-8")
     bad = ConfigLocation(blocker / "sub" / "config.json", "user", "唯一（不可写）")
     monkeypatch.setattr(config_module, "config_locations", lambda: [bad])
-    monkeypatch.setattr(config_module, "_resolved_location", None)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
 
     status = config_file_status()
 
@@ -235,7 +237,7 @@ def test_status_reports_why_the_preferred_location_failed(tmp_path, monkeypatch)
     bad = ConfigLocation(blocker / "sub" / "config.json", "user", "首选（不可写）")
     good = ConfigLocation(tmp_path / "ok" / "config.json", "localappdata", "备用（可写）")
     monkeypatch.setattr(config_module, "config_locations", lambda: [bad, good])
-    monkeypatch.setattr(config_module, "_resolved_location", None)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
 
     status = config_file_status()
 
@@ -257,7 +259,7 @@ def test_load_config_survives_location_change(tmp_path, monkeypatch):
     new_location = ConfigLocation(tmp_path / "new" / "config.json", "user", "新位置（可写）")
     old_location = ConfigLocation(legacy, "localappdata", "旧位置")
     monkeypatch.setattr(config_module, "config_locations", lambda: [new_location, old_location])
-    monkeypatch.setattr(config_module, "_resolved_location", None)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
 
     loaded = load_config()
 
@@ -295,6 +297,65 @@ def test_declared_project_fallback_is_actually_ignored(monkeypatch):
     _clear_location_env(monkeypatch)
     fallback = next(item for item in config_locations() if item.inside_project)
     assert git_ignores(fallback.path) is True
+
+
+# --------------------------------------------- 项目内兜底：必须获得显式同意
+def test_project_consent_sources(monkeypatch):
+    monkeypatch.delenv(CONSENT_ENV, raising=False)
+    assert project_consent_granted() is False  # 默认不同意 —— 不自动降级
+    assert project_consent_granted(True) is True
+    assert project_consent_granted(False) is False
+
+    monkeypatch.setenv(CONSENT_ENV, "1")
+    assert project_consent_granted() is True
+    monkeypatch.setenv(CONSENT_ENV, "nope")
+    assert project_consent_granted() is False
+
+
+def _only_project_writable(tmp_path, monkeypatch):
+    """构造「只有项目内兜底位置可写」的场景。"""
+    import whatbird.core.config as config_module
+
+    _clear_location_env(monkeypatch)
+    monkeypatch.delenv(CONSENT_ENV, raising=False)
+    monkeypatch.setattr(config_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(config_module, "git_ignores", lambda path: True)
+    monkeypatch.setattr(config_module, "_resolved_cache", {})
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("file", encoding="utf-8")
+    bad = ConfigLocation(blocker / "sub" / "config.json", "user", "用户目录（不可写）")
+    project = ConfigLocation(tmp_path / ".whatbird" / "config.json", "project", "项目内兜底", True)
+    monkeypatch.setattr(config_module, "config_locations", lambda: [bad, project])
+    return bad, project
+
+
+def test_project_fallback_needs_consent_before_writing(tmp_path, monkeypatch):
+    """未显式同意时绝不自动降级；同意后才写入项目内位置。"""
+    bad, project = _only_project_writable(tmp_path, monkeypatch)
+
+    status = config_file_status()
+
+    assert status["needs_consent"] is True
+    assert status["writable"] is False
+    assert status["path"] == str(bad.path)
+    assert status["project_candidate"]["writable"] is True
+
+    with pytest.raises(ConfigError) as excinfo:
+        save_config(ArkConfig(api_key="sk-x"))
+    assert CONSENT_ENV in excinfo.value.hint
+
+    saved = save_config(ArkConfig(api_key="sk-x"), allow_project=True)
+    assert saved == project.path
+    assert saved.exists()
+
+
+def test_env_consent_is_honoured(tmp_path, monkeypatch):
+    _, project = _only_project_writable(tmp_path, monkeypatch)
+    monkeypatch.setenv(CONSENT_ENV, "1")
+
+    assert config_file_status()["needs_consent"] is False
+    assert save_config(ArkConfig(api_key="sk-x")) == project.path
 
 
 # ------------------------------------------------------------------ 失败提示

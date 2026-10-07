@@ -9,8 +9,10 @@ from .config import (
     config_file_status,
     config_locations,
     default_config_file,
+    existing_config_file,
     git_ignores,
     load_config,
+    project_consent_granted,
     resolve_config_location,
     save_config,
 )
@@ -38,9 +40,11 @@ __all__ = [
     "config_file_status",
     "config_locations",
     "default_config_file",
+    "existing_config_file",
     "git_ignores",
     "identify",
     "load_config",
+    "project_consent_granted",
     "resolve_config_location",
     "save_config",
 ]

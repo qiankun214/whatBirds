@@ -238,6 +238,10 @@ code {
 .inline input { flex: 1; }
 .inline .btn { white-space: nowrap; }
 
+.consent { margin: 14px 0 6px; padding: 10px 12px; background: #fbfcfb; border: 1px solid var(--line); border-radius: 10px; }
+.checkbox { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; cursor: pointer; }
+.checkbox input { margin-top: 4px; flex: 0 0 auto; }
+
 .summary { margin: 0; }
 .summary div { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
 .summary div:last-child { border-bottom: 0; }

@@ -77,6 +77,10 @@ class ConfigUpdate(BaseModel):
     temperature: Optional[float] = None
     max_image_side: Optional[int] = None
     jpeg_quality: Optional[int] = None
+    allow_project_fallback: Optional[bool] = Field(
+        default=None,
+        description="是否同意把配置保存到项目内兜底位置（默认不同意，不会自动降级）",
+    )
 
 
 class PathRecognizeRequest(BaseModel):
@@ -105,6 +109,7 @@ def merge_config_update(current: ArkConfig, payload: Optional["ConfigUpdate"]) -
         return current
 
     changes = payload.model_dump(exclude_none=True)
+    changes.pop("allow_project_fallback", None)  # 这是控制项，不是配置项
     api_key = changes.get("api_key")
     if api_key is not None and ("****" in api_key or not api_key.strip()):
         changes.pop("api_key")
@@ -170,6 +175,8 @@ def create_app() -> FastAPI:
                 "kind": status["kind"],
                 "label": status["label"],
                 "is_fallback": status["is_fallback"],
+                "needs_consent": status["needs_consent"],
+                "project_candidate": status["project_candidate"],
                 "warning": status["warning"],
                 "preferred_path": status["preferred_path"],
                 "preferred_error": status["preferred_error"],
@@ -181,9 +188,10 @@ def create_app() -> FastAPI:
 
     @app.put("/api/config", tags=["config"], dependencies=[Depends(require_client_header)])
     def put_config(payload: ConfigUpdate) -> dict[str, Any]:
+        consent = payload.allow_project_fallback
         updated = merge_config_update(load_config(), payload)
-        path = save_config(updated)
-        status = config_file_status()
+        path = save_config(updated, allow_project=consent)
+        status = config_file_status(allow_project=consent)
         return {
             "config": updated.masked_dict(),
             "config_file": str(path),
@@ -192,6 +200,8 @@ def create_app() -> FastAPI:
                 "kind": status["kind"],
                 "label": status["label"],
                 "is_fallback": status["is_fallback"],
+                "needs_consent": status["needs_consent"],
+                "project_candidate": status["project_candidate"],
                 "warning": status["warning"],
             },
             "message": "配置已保存，后续调用立即生效",

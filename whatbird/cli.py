@@ -33,6 +33,7 @@ from .core import (
 )
 from .core.config import (
     CONFIG_DIR_ENV,
+    CONSENT_ENV,
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
     write_failure_hint,
@@ -135,8 +136,8 @@ def cmd_config_set(args: argparse.Namespace) -> int:
         max_image_side=args.max_image_side,
         jpeg_quality=args.jpeg_quality,
     )
-    path = save_config(config)
-    status = config_file_status()
+    path = save_config(config, allow_project=args.allow_project_config)
+    status = config_file_status(allow_project=args.allow_project_config)
     print(f"配置已保存：{path}")
     print(f"  位置：{status['label']}｜{'可写' if status['writable'] else '不可写'}")
     if status["warning"]:
@@ -157,6 +158,12 @@ def cmd_config_show(args: argparse.Namespace) -> int:
         print(f"  提示：{status['warning']}")
     if status["preferred_error"]:
         print(f"  首选位置不可写原因：{status['preferred_error']}")
+    if status["needs_consent"]:
+        project = status.get("project_candidate") or {}
+        print(f"  提示：用户级位置都不可写。若同意把配置放到 {project.get('path')}"
+              "（已被 git 忽略、不会提交），请显式同意：")
+        print("        whatbird config set --allow-project-config ...")
+        print(f'        或设置环境变量 {CONSENT_ENV}=1')
     if args.show_key:
         if not config.configured:
             print("API Key：未配置")
@@ -196,6 +203,9 @@ def cmd_config_doctor(_: argparse.Namespace) -> int:
         print(f"  当前读取自：{loaded_from}")
     if status["warning"]:
         print(f"  提示：{status['warning']}")
+    if status["needs_consent"]:
+        print("  注意：项目内兜底位置可写，但需要显式同意才会使用"
+              f"（--allow-project-config 或 {CONSENT_ENV}=1）")
 
     if not status["writable"]:
         print()
@@ -285,6 +295,13 @@ def build_parser() -> argparse.ArgumentParser:
     set_parser.add_argument("--temperature", type=float)
     set_parser.add_argument("--max-image-side", type=int, dest="max_image_side", help="图片最长边上限")
     set_parser.add_argument("--jpeg-quality", type=int, dest="jpeg_quality", help="重编码 JPEG 质量 1~100")
+    set_parser.add_argument(
+        "--allow-project-config",
+        action="store_true",
+        default=None,
+        dest="allow_project_config",
+        help="用户目录不可写时，显式同意把配置保存到项目内 .whatbird/（已被 git 忽略）",
+    )
     set_parser.set_defaults(handler=cmd_config_set)
 
     show_parser = config_sub.add_parser("show", help="查看当前配置（默认脱敏）")
