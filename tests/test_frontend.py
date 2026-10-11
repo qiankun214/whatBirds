@@ -120,13 +120,45 @@ def test_frontend_only_calls_existing_endpoints():
 
 
 def test_frontend_flows_are_wired_to_endpoints():
-    """页面的三条主流程都必须接上真实接口。"""
+    """页面的四条主流程都必须接上真实接口。"""
     used = js_api_paths()
     assert "/api/config" in used              # 读取 + 保存配置
     assert "/api/config/verify" in used       # 测试连接
     assert "/api/batch/start-upload" in used  # 上传识别（单张与批量共用）
     assert "/api/batch/start-paths" in used   # 路径识别（单张与批量共用）
     assert "/api/batch/" in used              # 轮询进度、终止任务
+    assert "/api/focus" in used               # 对焦点分析（上传）
+    assert "/api/focus-path" in used          # 对焦点分析（服务器路径）
+
+
+def test_focus_panel_markup_exists():
+    """对焦点分析面板的元素：两个入口按钮、标注图、两条路线的结果表与结论。"""
+    for marker in (
+        'id="btn-focus-upload"',
+        'id="btn-focus-path"',
+        'id="focus-overlay"',
+        'id="focus-rows"',
+        'id="focus-verdict"',
+        'id="focus-region"',
+        'id="focus-notes"',
+        'id="focus-candidates"',
+        'id="focus-error"',
+        'id="focus-empty"',
+        'id="focus-body"',
+        'id="focus-meta"',
+    ):
+        assert marker in HTML, marker
+
+
+def test_focus_panel_is_labelled_with_local_algorithm():
+    """必须让用户知道这一步不打模型接口、不消耗额度。"""
+    assert "纯本地算法" in HTML
+    assert "不消耗额度" in HTML
+
+
+def test_css_styles_the_focus_panel():
+    for selector in (".focus-card", ".focus-grid", ".focus-image", ".focus-table", ".focus-verdict"):
+        assert selector in CSS, selector
 
 
 def test_batch_and_progress_ui_markup_exists():

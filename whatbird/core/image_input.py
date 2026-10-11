@@ -58,13 +58,8 @@ class PreparedImage:
         }
 
 
-def prepare_image(
-    path: str | Path,
-    *,
-    max_image_side: int = DEFAULT_MAX_SIDE,
-    quality: int = DEFAULT_QUALITY,
-) -> PreparedImage:
-    """读取本地 jpg 文件并生成可直接投喂模型的 data URL。"""
+def _validated_path(path: str | Path) -> Path:
+    """校验本地路径确实是受支持的图片文件（错误信息与提示保持中文且具体）。"""
     image_path = Path(path).expanduser()
 
     if not image_path.exists():
@@ -82,11 +77,25 @@ def prepare_image(
             f"暂不支持该格式：{image_path.suffix or '（无扩展名）'}",
             hint="第一版仅支持 .jpg / .jpeg，可用 Pillow 或画图工具转为 jpg",
         )
+    return image_path
 
+
+def _read_path_bytes(image_path: Path) -> bytes:
     try:
-        raw = image_path.read_bytes()
+        return image_path.read_bytes()
     except OSError as exc:
         raise ImageInputError(f"读取图片失败：{image_path}", hint=str(exc)) from exc
+
+
+def prepare_image(
+    path: str | Path,
+    *,
+    max_image_side: int = DEFAULT_MAX_SIDE,
+    quality: int = DEFAULT_QUALITY,
+) -> PreparedImage:
+    """读取本地 jpg 文件并生成可直接投喂模型的 data URL。"""
+    image_path = _validated_path(path)
+    raw = _read_path_bytes(image_path)
 
     return _encode(
         raw,
@@ -123,7 +132,7 @@ def _encode(raw: bytes, *, source: str, max_image_side: int, quality: int) -> Pr
     try:
         with Image.open(io.BytesIO(raw)) as image:
             original_width, original_height = image.size
-            prepared = _to_rgb(image)
+            prepared = to_rgb(image)
             if max(original_width, original_height) > max_image_side:
                 prepared.thumbnail((max_image_side, max_image_side), Image.LANCZOS)
             width, height = prepared.size
@@ -146,10 +155,10 @@ def _encode(raw: bytes, *, source: str, max_image_side: int, quality: int) -> Pr
     )
 
 
-def _to_rgb(image: Image.Image) -> Image.Image:
+def to_rgb(image: Image.Image) -> Image.Image:
     """统一转成 RGB；带透明通道的图片用白底合成，避免出现黑色背景。"""
     if image.mode == "RGB":
-        return image
+        return image.copy()
     if image.mode in ("RGBA", "LA", "P"):
         rgba = image.convert("RGBA")
         canvas = Image.new("RGB", rgba.size, (255, 255, 255))
@@ -213,3 +222,85 @@ class ImageSource:
             "path": self.path,
             "byte_size": len(self.data) if self.data is not None else None,
         }
+
+
+# --------------------------------------------------------------- 本地算法用
+def read_image_bytes(
+    source: "ImageSource | str | Path | bytes | bytearray | tuple[str, bytes]",
+) -> tuple[str, bytes]:
+    """把各种来源统一成 ``(显示名, 原始字节)``，并做与 :func:`prepare_image` 一致的校验。
+
+    对焦分析要同时读**元数据**和**像素**，两边必须来自同一份字节，
+    所以先把原始字节取出来交给上层，再由上层决定怎么用。
+    """
+    if isinstance(source, ImageSource):
+        if source.path is not None:
+            path = _validated_path(source.path)
+            return str(path), _read_path_bytes(path)
+        return source.name, bytes(source.data or b"")
+
+    if isinstance(source, (bytes, bytearray)):
+        return "<bytes>", bytes(source)
+
+    if isinstance(source, tuple) and len(source) == 2:
+        name, payload = source
+        return str(name), bytes(payload)
+
+    path = _validated_path(source)
+    return str(path), _read_path_bytes(path)
+
+
+def open_stored_image(name: str, raw: bytes) -> Image.Image:
+    """把原始字节打开成 PIL 图像（**保持存储方向**，不转正、不转 RGB）。
+
+    对焦分析需要先看未转正的图才能读到 EXIF 里的朝向，所以这里不直接给 RGB。
+    解析失败时抛 :class:`ImageInputError`，与 :func:`prepare_image` 的中文提示一致。
+    """
+    if not raw:
+        raise ImageInputError("上传的图片内容为空", hint="请重新选择一张 jpg 图片")
+    try:
+        image = Image.open(io.BytesIO(raw))
+        image.load()
+        return image
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as exc:
+        raise ImageInputError(
+            f"无法解析该图片，文件可能已损坏或并不是真正的 JPEG：{name}",
+            hint="请换一张能正常打开的 jpg 图片",
+        ) from exc
+
+
+def load_rgb_image(
+    source: "ImageSource | str | Path | bytes | bytearray | tuple[str, bytes]",
+) -> tuple[str, Image.Image]:
+    """读图并转成 RGB 的 PIL 图像：**不缩放、不重编码**。
+
+    与 :func:`prepare_image` 的区别：那个是给模型看的（按最长边缩小 + 转 JPEG + base64），
+    这个是给本地图像算法看的（保留原分辨率）。校验与中文错误提示完全一致。
+    """
+    name, raw = read_image_bytes(source)
+    with open_stored_image(name, raw) as image:
+        return name, to_rgb(image)
+
+
+def load_upright_rgb(
+    source: "ImageSource | str | Path | bytes | bytearray | tuple[str, bytes]",
+) -> tuple[str, Image.Image]:
+    """读图 → 按 EXIF Orientation 转正 → 转 RGB，返回 ``(显示名, 图像)``。
+
+    本地图像能力（对焦点分析、YOLO 鸟类位置检测）都必须先转正再算：
+    - 不转正，竖拍照片上的坐标会和用户看到的画面错位；
+    - 大家都走同一个函数，才能保证「检测框」和「对焦点标注」落在同一套坐标系里。
+    """
+    from PIL import ImageOps
+
+    name, raw = read_image_bytes(source)
+    with open_stored_image(name, raw) as opened:
+        upright = ImageOps.exif_transpose(opened)
+        return name, to_rgb(upright)
+
+
+def encode_png(image: Image.Image) -> bytes:
+    """把 PIL 图像编码成 PNG 字节（标注图用，刻意保真、不重编码成 JPEG）。"""
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()

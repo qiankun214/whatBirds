@@ -12,9 +12,22 @@
 # Notes:
 # - openai 1.x : Ark's official docs and examples use the 1.x chat.completions API
 # - pydantic 2 : the core/web layers use pydantic v2 model_dump()
+# - opencv-python-headless : traditional-CV focus analysis. Headless (not the GUI
+#   build) because we only need cv2's image ops, and it has no GUI dependency so it
+#   also installs on a server without a desktop.
+# - numpy is pinned explicitly because whatbird/core/focus/content.py imports it
+#   directly; it must not float with whatever opencv happens to pull in.
+# - exifread : pure-Python EXIF/MakerNote reader for the camera's focus point.
+#   BSD-3-Clause. (python-exiv2/libexiv2 is more complete but is GPL-3.0 and ships
+#   a 9 MB binary wheel, which would change this project's licensing.)
+# - numpy 1.26.x is the line this was developed against; re-run the focus tests
+#   before bumping it to 2.x.
 openai==1.109.1
 fastapi==0.115.14
 uvicorn==0.34.3
 python-multipart==0.0.20
 pillow==11.3.0
 pydantic==2.11.7
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+exifread==3.5.1

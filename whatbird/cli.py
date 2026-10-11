@@ -6,6 +6,7 @@
     python -m whatbird.cli config show
     python -m whatbird.cli identify D:\\photos\\bird.jpg
     python -m whatbird.cli identify D:\\photos\\bird.jpg --json
+    python -m whatbird.cli focus D:\\photos\\bird.jpg --overlay out.png
     python -m whatbird.cli serve --port 8000
 
 本模块只做参数解析与结果展示，所有业务逻辑都在 ``whatbird.core`` 里。
@@ -29,12 +30,20 @@ from .core import (
     BatchReport,
     BirdIdentification,
     ConfigError,
+    DetectParams,
+    FocusHit,
+    FocusParams,
+    FocusReport,
     WhatBirdError,
+    analyze_focus,
     config_file_status,
     default_config_file,
+    detect_birds,
     interpreter_status,
     load_config,
     migrate_config,
+    render_bird_overlay,
+    render_focus_overlay,
     save_config,
 )
 from .core.config import (
@@ -44,6 +53,7 @@ from .core.config import (
     DEFAULT_MODEL,
     write_failure_hint,
 )
+from .core.detect.models import BIRD_CLASS_ID, DEFAULT_MODEL as DEFAULT_DETECT_MODEL, DetectionReport
 from .core.prompt import MODE_FAST, MODE_FULL
 from .core.recognizer import BirdRecognizer
 
@@ -357,6 +367,244 @@ def _render_batch_line(item: BatchItem) -> str:
     return f"[{item.index}/{item.total}] {body}  | {item.source}  {item.elapsed_seconds:.1f}s{usage}"
 
 
+# --------------------------------------------------------------------- 对焦点
+def _focus_params(args: argparse.Namespace) -> FocusParams:
+    return FocusParams(
+        max_side=args.max_side,
+        metric=args.metric,
+        top_n=args.top,
+        use_exif=not args.no_exif,
+        use_content=not args.no_content,
+    )
+
+
+def _render_hit(title: str, hit: FocusHit, source: str) -> list[str]:
+    lines = [title]
+    if hit.found:
+        lines.append(
+            f"  √ 对焦点 ({hit.x}, {hit.y})"
+            f"  相对位置 {hit.x_ratio:.1%} / {hit.y_ratio:.1%}"
+            f"  置信度 {hit.confidence:.0%}"
+        )
+        lines.append(f"    来源：{source}")
+        lines.append(f"    说明：{hit.detail}")
+    else:
+        lines.append(f"  × 无结论：{hit.detail}")
+    return lines
+
+
+def _render_focus(report: FocusReport) -> str:
+    rule = "─" * 60
+    lines = [rule]
+    lines.append(f"  对焦点分析  {report.source_image or '-'}")
+    lines.append(
+        f"  图像 {report.width}×{report.height}"
+        f"（分析尺度 {report.analyzed_width}×{report.analyzed_height}，"
+        f"缩放系数 {report.scale:.3f}）"
+    )
+    lines.append(rule)
+
+    exif_source = report.exif.source_tags.get("tag", "") or "EXIF"
+    lines.extend(_render_hit("路线一 · EXIF 元数据（相机声称的对焦点）", report.exif, exif_source))
+    lines.append("")
+    lines.extend(
+        _render_hit(
+            "路线二 · 内容分析（画面实际最清晰处）",
+            report.content,
+            "SML 改进拉普拉斯清晰度峰值",
+        )
+    )
+
+    if report.region is not None:
+        region = report.region
+        lines.append("")
+        lines.append("合焦区域（清晰度超阈值的连通区域）")
+        lines.append(
+            f"  包围盒  x {region.x}  y {region.y}  {region.width}×{region.height}"
+            f"   占画面 {region.area_ratio:.1%}"
+        )
+
+    other = [item for item in report.candidates[1:]]
+    if other:
+        lines.append("")
+        lines.append("其他候选点（按相对锐度排序）")
+        for index, item in enumerate(other, start=2):
+            lines.append(f"  {index}. ({item.x}, {item.y})  相对锐度 {item.score:.0%}")
+
+    lines.append("")
+    if report.exif.found and report.content.found:
+        lines.append(f"结论：两条路线{'一致（互相印证）' if report.agree else '不一致，值得看一眼'}")
+    elif report.available_methods():
+        lines.append("结论：只有一条路线给出了结论（见上面的原因）")
+    else:
+        lines.append("结论：两条路线都没能定位对焦点")
+
+    if report.notes:
+        lines.append("")
+        for note in report.notes:
+            lines.append(f"提示：{note}")
+
+    lines.append("")
+    lines.append(f"元数据：耗时 {report.elapsed_seconds:.2f}s ｜ 参数 {report.params.get('metric', '-')}")
+    return "\n".join(lines)
+
+
+def _overlay_path_for(args: argparse.Namespace, image: str, index: int) -> Path | None:
+    """决定这张图的标注图存哪。"""
+    if args.overlay and len(args.images) == 1:
+        return Path(args.overlay).expanduser()
+    if args.overlay_dir:
+        stem = Path(image).stem or f"image{index}"
+        return Path(args.overlay_dir).expanduser() / f"{stem}.focus.png"
+    return None
+
+
+def cmd_focus(args: argparse.Namespace) -> int:
+    """分析图片的对焦点（EXIF 元数据 + 传统图形学内容分析，两条路线都上报）。"""
+    if args.overlay and args.overlay_dir:
+        print("[错误] --overlay 与 --overlay-dir 只能给一个", file=sys.stderr)
+        return 2
+    if args.overlay and len(args.images) > 1:
+        print(
+            "[错误] 一次给多张图时请用 --overlay-dir（多张图不能写进同一个文件）",
+            file=sys.stderr,
+        )
+        return 2
+
+    params = _focus_params(args)
+    overlay_dir = Path(args.overlay_dir).expanduser() if args.overlay_dir else None
+    if overlay_dir is not None:
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+
+    reports: list[FocusReport] = []
+    for index, image in enumerate(args.images, start=1):
+        report = analyze_focus(image, params=params)
+        reports.append(report)
+
+        target = _overlay_path_for(args, image, index)
+        if target is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(render_focus_overlay(image, report))
+
+        if not args.json:
+            if len(args.images) > 1:
+                print(f"[{index}/{len(args.images)}] {report.summary_line()}")
+            else:
+                print(_render_focus(report))
+            if target is not None:
+                print(f"标注图已保存：{target}")
+
+    if args.json:
+        payload: Any
+        if len(reports) == 1:
+            payload = reports[0].to_dict()
+        else:
+            payload = {"total": len(reports), "items": [item.to_dict() for item in reports]}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+# --------------------------------------------------------------------- 鸟类位置检测
+def _detect_params(args: argparse.Namespace) -> DetectParams:
+    return DetectParams(
+        model_name=args.model,
+        model_dir=Path(args.model_dir).expanduser() if args.model_dir else None,
+        device=args.device,
+        imgsz=args.imgsz,
+        conf=args.conf,
+        iou=args.iou,
+        classes=() if args.all_classes else (BIRD_CLASS_ID,),
+    )
+
+
+def _detect_overlay_path_for(args: argparse.Namespace, image: str, index: int) -> Path | None:
+    """决定这张图的标注图存哪（与 ``focus`` 的规则保持一致）。"""
+    if args.overlay and len(args.images) == 1:
+        return Path(args.overlay).expanduser()
+    if args.overlay_dir:
+        stem = Path(image).stem or f"image{index}"
+        return Path(args.overlay_dir).expanduser() / f"{stem}.detect.png"
+    return None
+
+
+def _render_detections(report: DetectionReport) -> str:
+    rule = "─" * 60
+    lines = [rule]
+    lines.append(f"  鸟类位置检测  {report.source_image or '-'}")
+    lines.append(f"  图像 {report.width}×{report.height}")
+    lines.append(f"  设备 {report.device or '-'} ｜ 模型 {report.model_name or '-'}")
+    lines.append(rule)
+
+    if not report.birds:
+        lines.append("  未检测到鸟")
+    else:
+        lines.append(f"  检测到 {report.count} 只鸟（按置信度降序）")
+        for index, bird in enumerate(report.birds, start=1):
+            lines.append(
+                f"  #{index}  框 x={bird.x} y={bird.y} w={bird.width} h={bird.height}"
+                f" ｜ 相对位置 {bird.x_ratio:.1%}/{bird.y_ratio:.1%}"
+                f" ｜ 置信度 {bird.confidence:.0%}"
+            )
+
+    if report.other_classes:
+        lines.append("")
+        lines.append("画面里还有（已按参数过滤，不计入结果）：" + "、".join(report.other_classes))
+
+    if report.notes:
+        lines.append("")
+        for note in report.notes:
+            lines.append(f"  说明：{note}")
+
+    lines.append("")
+    lines.append(f"  耗时 {report.elapsed_seconds:.2f}s")
+    return "\n".join(lines)
+
+
+def cmd_detect(args: argparse.Namespace) -> int:
+    """检测图片里每一只鸟的位置（纯本地 YOLO 推理，不调用方舟、不消耗额度）。"""
+    if args.overlay and args.overlay_dir:
+        print("[错误] --overlay 与 --overlay-dir 只能给一个", file=sys.stderr)
+        return 2
+    if args.overlay and len(args.images) > 1:
+        print(
+            "[错误] 一次给多张图时请用 --overlay-dir（多张图不能写进同一个文件）",
+            file=sys.stderr,
+        )
+        return 2
+
+    params = _detect_params(args)
+    overlay_dir = Path(args.overlay_dir).expanduser() if args.overlay_dir else None
+    if overlay_dir is not None:
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+
+    reports: list[DetectionReport] = []
+    for index, image in enumerate(args.images, start=1):
+        report = detect_birds(image, params=params)
+        reports.append(report)
+
+        target = _detect_overlay_path_for(args, image, index)
+        if target is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(render_bird_overlay(image, report))
+
+        if not args.json:
+            if len(args.images) > 1:
+                print(f"[{index}/{len(args.images)}] {report.summary_line()}  | {report.source_image}")
+            else:
+                print(_render_detections(report))
+            if target is not None:
+                print(f"标注图已保存：{target}")
+
+    if args.json:
+        payload: Any
+        if len(reports) == 1:
+            payload = reports[0].to_dict()
+        else:
+            payload = {"total": len(reports), "items": [item.to_dict() for item in reports]}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
@@ -402,6 +650,8 @@ def build_parser() -> argparse.ArgumentParser:
             "示例：\n"
             "  whatbird config set --api-key - \n"
             "  whatbird identify D:\\photos\\bird.jpg\n"
+            "  whatbird focus D:\\photos\\bird.jpg --overlay out.png\n"
+            "  whatbird detect D:\\photos\\bird.jpg --overlay boxes.png\n"
             "  whatbird serve --port 8000\n"
         ),
     )
@@ -493,6 +743,114 @@ def build_parser() -> argparse.ArgumentParser:
         help="批量并发数 1~8（默认取配置，通常是 3；1 = 完全串行）",
     )
     identify_parser.set_defaults(handler=cmd_identify, mode=None)
+
+    # focus
+    focus_parser = subparsers.add_parser(
+        "focus",
+        help="分析对焦点：EXIF 元数据 + 传统图形学内容分析（两条路线都上报）",
+        description=(
+            "找出这张照片对焦在哪里。\n"
+            "同时跑两条独立路线并都上报：\n"
+            "  1) EXIF 路线：读相机写进元数据的对焦点（相机声称的）；\n"
+            "  2) 内容路线：用传统图形学算法分析像素清晰度分布（画面实际的）。\n"
+            "两条路线都不需要联网、不消耗任何额度。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    focus_parser.add_argument("images", nargs="+", help="jpg / jpeg 文件路径")
+    focus_parser.add_argument("--json", action="store_true", help="以 JSON 输出（便于脚本处理）")
+    focus_parser.add_argument(
+        "--overlay",
+        help="把标注图保存到该路径（仅单张图；PNG，原分辨率）",
+    )
+    focus_parser.add_argument(
+        "--overlay-dir",
+        dest="overlay_dir",
+        help="多张图时把标注图按 <原名>.focus.png 存进该目录",
+    )
+    focus_parser.add_argument(
+        "--metric",
+        choices=("sml", "tenengrad"),
+        default="sml",
+        help="清晰度评价函数：sml = 改进拉普拉斯（默认，对景深最稳），tenengrad = 梯度平方和",
+    )
+    focus_parser.add_argument(
+        "--max-side",
+        type=int,
+        dest="max_side",
+        default=1024,
+        help="分析时把图片最长边缩到该值（默认 1024），越大越慢越细",
+    )
+    focus_parser.add_argument(
+        "--top",
+        type=int,
+        default=5,
+        help="上报的候选对焦点个数（默认 5）",
+    )
+    focus_parser.add_argument(
+        "--no-exif",
+        action="store_true",
+        dest="no_exif",
+        help="只跑内容分析路线",
+    )
+    focus_parser.add_argument(
+        "--no-content",
+        action="store_true",
+        dest="no_content",
+        help="只跑 EXIF 路线",
+    )
+    focus_parser.set_defaults(handler=cmd_focus)
+
+    # detect
+    detect_parser = subparsers.add_parser(
+        "detect",
+        help="找出图片里每一只鸟的位置（本地 YOLO 推理，可用 Intel 显卡加速）",
+        description=(
+            "用本地 YOLO 权重检测画面里每一只鸟的位置（框 + 置信度）。\n"
+            "只报鸟（COCO 类别 id 14），其他类别只统计不返回。\n"
+            "纯本地推理：不调用方舟、不消耗额度、不需要 API Key；\n"
+            "首次运行会自动下载 YOLO 权重（也可用 --model 指向本地权重文件）。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    detect_parser.add_argument("images", nargs="+", help="jpg / jpeg 文件路径")
+    detect_parser.add_argument("--json", action="store_true", help="以 JSON 输出（便于脚本处理）")
+    detect_parser.add_argument(
+        "--overlay",
+        help="把画框标注图保存到该路径（仅单张图；PNG，原分辨率）",
+    )
+    detect_parser.add_argument(
+        "--overlay-dir",
+        dest="overlay_dir",
+        help="多张图时把标注图按 <原名>.detect.png 存进该目录",
+    )
+    detect_parser.add_argument(
+        "--model",
+        default=DEFAULT_DETECT_MODEL,
+        help=f"YOLO 权重名或本地权重路径，默认 {DEFAULT_DETECT_MODEL}",
+    )
+    detect_parser.add_argument(
+        "--model-dir",
+        dest="model_dir",
+        default=None,
+        help="权重目录（默认 ~/.whatbird/models）；同名权重已存在就用本地的，不再联网",
+    )
+    detect_parser.add_argument(
+        "--device",
+        choices=("auto", "xpu", "cpu"),
+        default="auto",
+        help="推理设备：auto 优先用 Intel 显卡（xpu），不可用退回 cpu",
+    )
+    detect_parser.add_argument("--conf", type=float, default=0.25, help="置信度阈值（默认 0.25）")
+    detect_parser.add_argument("--iou", type=float, default=0.7, help="NMS 的 IoU 阈值（默认 0.7）")
+    detect_parser.add_argument("--imgsz", type=int, default=640, help="推理分辨率（默认 640，越大越慢）")
+    detect_parser.add_argument(
+        "--all-classes",
+        action="store_true",
+        dest="all_classes",
+        help="不限制类别（默认只检测鸟；加了它仍只把鸟算进结果，其他类别会列出来）",
+    )
+    detect_parser.set_defaults(handler=cmd_detect)
 
     # serve
     serve_parser = subparsers.add_parser("serve", help="启动 Web 服务（后端 + 静态前端）")

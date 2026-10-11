@@ -6,6 +6,15 @@
 支持**批量识别**：一次选择多张图片依次识别，界面显示进度（当前第几张 / 共几张）并给出**终止**按钮，
 结果以表格列出，可点击查看单张详情、导出 JSON。
 
+另外提供两项**纯本地**能力（不联网、不消耗额度、不需要 API Key）：
+
+- **对焦点分析**：用**传统图形学算法**（改进拉普拉斯清晰度图 + Otsu 合焦区域 + 区域锐度加权质心）
+  找出画面里实际最清晰的位置，同时读取相机写进 EXIF 的对焦点，**两条路线都上报**并在原图上标注。
+  算法细节见 [`docs/focus-algorithm.md`](docs/focus-algorithm.md)。
+- **鸟类位置检测**：用 **YOLO**（可选依赖 ultralytics + torch）找出画面里**每一只鸟的位置**（框 + 置信度），
+  并在原分辨率图上画框标注；优先使用 **Intel 显卡（XPU）** 加速，不可用时自动退回 CPU。
+  详见 [`docs/bird-detection.md`](docs/bird-detection.md)。
+
 项目约定见 [`Agent.md`](Agent.md)（固定载入内容）：Python 工作语言、pip 用清华镜像、
 前后端分离、git 版本管理、API 配置隔离且不入库。
 
@@ -26,6 +35,8 @@
         │            whatbird/core             │
         │ config / image_input / prompt /      │
         │ ark_client / recognizer / models     │
+        │ focus/   (对焦点分析，纯本地)          │
+        │ detect/  (鸟类位置检测，本地 YOLO)     │
         └──────────────────┬───────────────────┘
                            │ OpenAI 兼容协议
                   ┌────────▼────────┐
@@ -35,6 +46,8 @@
 ```
 
 - `whatbird/core` —— 纯业务，不 import 任何 Web 框架；未来接新的 UI（桌面端、Bot…）只需再写一个前端。
+- `whatbird/core/focus/` —— 对焦点分析（EXIF 路线 + 传统图形学内容分析路线），**不联网**。
+- `whatbird/core/detect/` —— 鸟类位置检测（YOLO，Intel 显卡优先），**不联网**、按需下载权重。
 - `whatbird/cli.py` —— 命令行前端（`CLI -> core`）。
 - `whatbird/web/` —— FastAPI REST 后端 + 静态前端（`UI -> core`）。
 
@@ -42,21 +55,35 @@
 WhatBird/
 ├── Agent.md                     # 固定载入约定
 ├── README.md
-├── requirements.txt             # 运行依赖
+├── requirements.txt             # 运行依赖（识别 + 对焦）
+├── requirements-detect.txt      # 可选依赖（YOLO 位置检测，含安装顺序说明）
 ├── requirements-dev.txt         # 开发/测试依赖
 ├── pyproject.toml
 ├── examples/
 │   └── config.example.json      # 配置模板（不含真实密钥，可提交）
-├── docs/screenshots/            # 界面截图（README 引用）
+├── samples/                     # 真实验证样张（不入库，见其 README）
+├── docs/
+│   ├── focus-algorithm.md       # 对焦点分析算法说明
+│   ├── bird-detection.md        # 鸟类位置检测说明（模型 / 坐标 / 参数 / 边界）
+│   └── screenshots/             # 界面截图（README 引用）
 ├── whatbird/
 │   ├── core/
 │   │   ├── config.py            # 配置读写 + 隔离 + 脱敏
 │   │   ├── errors.py            # 统一异常体系
-│   │   ├── image_input.py       # jpg 校验 / 压缩 / base64
+│   │   ├── image_input.py       # jpg 校验 / 压缩 / base64 / 转正
 │   │   ├── prompt.py            # 提示词 + 模型输出解析
 │   │   ├── ark_client.py        # 方舟调用（唯一的外部通信点）
 │   │   ├── models.py            # 数据契约
-│   │   └── recognizer.py        # 门面 BirdRecognizer
+│   │   ├── recognizer.py        # 门面 BirdRecognizer
+│   │   ├── focus/               # 对焦点分析（门面 analyze_focus）
+│   │   │   ├── models.py        #   结果数据契约
+│   │   │   ├── content.py       #   内容分析（opencv，传统图形学）
+│   │   │   ├── exif_focus.py    #   EXIF / MakerNote 对焦点读取
+│   │   │   └── overlay.py       #   标注图渲染（Pillow）
+│   │   └── detect/              # 鸟类位置检测（门面 detect_birds）
+│   │       ├── models.py        #   结果数据契约 + 参数
+│   │       ├── backend.py       #   ultralytics 适配层（唯一的重依赖点）
+│   │       └── overlay.py       #   画框标注图渲染（Pillow）
 │   ├── cli.py                   # CLI 前端
 │   └── web/
 │       ├── app.py               # FastAPI REST 层
@@ -101,6 +128,34 @@ python -m venv .venv
 >
 > ⚠ **不要把本项目装进系统 Python**：那会升级共享的 pydantic / Pillow，可能弄坏你机器上原有的包
 > （本机就踩过：spacy 3.6 需要 pydantic v1、gradio 3.45 需要 Pillow < 11）。始终用独立 venv。
+> 本机还踩过一次：在项目目录里直接用 `python -m pip install` —— 而 PATH 上排第一的是系统 Python，
+> 于是包装进了系统解释器。**装依赖请始终写全路径** `.venv\Scripts\python.exe`，
+> 或用 `\.venv\Scripts\Activate.ps1` 激活后再用 `python`。
+
+### 可选：安装鸟类位置检测依赖
+
+只有要用 `whatbird detect`（YOLO 找鸟的位置）时才需要。**按顺序三条命令**，原因见
+[`requirements-detect.txt`](requirements-detect.txt) 与 [`docs/bird-detection.md`](docs/bird-detection.md)：
+
+```bat
+:: 1) torch / torchvision 必须来自 PyTorch 官方 XPU 源（默认源是 CPU 版，用不上 Intel 显卡）
+.venv\Scripts\python.exe -m pip install -i https://download.pytorch.org/whl/xpu torch==2.8.0 torchvision==0.23.0
+
+:: 2) ultralytics 必须加 --no-deps：它会用 GUI 版 opencv-python 顶掉本项目刻意选的 headless 版
+.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-deps ultralytics==8.4.175
+
+:: 3) 补齐 --no-deps 跳过的真正运行时依赖
+.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pyyaml scipy psutil py-cpuinfo ultralytics-thop
+```
+
+装完验证（期望打印 `2.8.0+xpu True`）：
+
+```bat
+.venv\Scripts\python.exe -c "import torch;print(torch.__version__, torch.xpu.is_available())"
+```
+
+> 装完 pip 可能报 `ultralytics requires opencv-python / polars / nvidia-ml-py` —— 这是 `--no-deps`
+> 的正常产物：`cv2` 已由 `opencv-python-headless` 提供（够用），`polars` / `nvidia-ml-py` 推理路径根本不会 import。
 
 
 ---
@@ -249,6 +304,111 @@ python -m whatbird.cli identify D:\photos\*.jpg --fast --concurrency 4   # 快�
 
 ---
 
+## 4.1 对焦点分析（CLI -> core）
+
+找出这张照片对焦在哪里。**纯本地算法**：不调用方舟、不消耗额度、不需要 API Key。
+
+```bash
+python -m whatbird.cli focus D:\photos\bird.jpg
+python -m whatbird.cli focus D:\photos\bird.jpg --json
+python -m whatbird.cli focus D:\photos\bird.jpg --overlay D:\out\bird-focus.png
+python -m whatbird.cli focus D:\photos\*.jpg --overlay-dir D:\out
+```
+
+输出示例：
+
+```
+────────────────────────────────────────────────────────────
+  对焦点分析  D:\photos\bird.jpg
+  图像 6000×4000（分析尺度 1024×683，缩放系数 0.171）
+────────────────────────────────────────────────────────────
+路线一 · EXIF 元数据（相机声称的对焦点）
+  √ 对焦点 (3012, 1988)  相对位置 50.2% / 49.7%  置信度 80%
+    来源：Exif.Photo.SubjectArea
+    说明：来自 EXIF 标准标签 SubjectArea（4 值矩形）
+
+路线二 · 内容分析（画面实际最清晰处）
+  √ 对焦点 (2980, 2010)  相对位置 49.7% / 50.3%  置信度 100%
+    来源：SML 改进拉普拉斯清晰度峰值
+    说明：SML 改进拉普拉斯清晰度峰值位于合焦区域中心（峰值/中位数 = 472.8，合焦区域占画面 5.1%）
+
+合焦区域（清晰度超阈值的连通区域）
+  包围盒  x 2400  y 1600  1200×900   占画面 9.0%
+
+结论：两条路线一致（互相印证）
+
+元数据：耗时 0.15s ｜ 参数 sml
+```
+
+`--overlay` 会生成一张**原分辨率的标注图**：红色十字 + 方框是 EXIF 记录的对焦点，
+青色十字 + 圆环是画面实际最清晰处，虚线框是合焦区域。两种颜色在图和网页上是一致的。
+
+常用参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--json` | 机器可读输出（单张给对象，多张给 `{total, items}`） |
+| `--overlay` / `--overlay-dir` | 保存标注图（单张用前者，多张用后者） |
+| `--metric sml\|tenengrad` | 清晰度评价函数（默认 `sml`，对景深最稳） |
+| `--max-side 1024` | 分析时最长边缩到多少 |
+| `--top 5` | 上报的候选点个数 |
+| `--no-exif` / `--no-content` | 只跑其中一条路线 |
+
+算法原理、参数含义与已知边界见 [`docs/focus-algorithm.md`](docs/focus-algorithm.md)。
+
+---
+
+## 4.2 鸟类位置检测（CLI -> core）
+
+找出画面里**每一只鸟的位置**（框 + 置信度）。用本地 YOLO 权重推理：**不调用方舟、不消耗额度、
+不需要 API Key**，优先使用 Intel 显卡（XPU），不可用时自动退回 CPU。
+
+```bash
+python -m whatbird.cli detect D:\photos\bird.jpg
+python -m whatbird.cli detect D:\photos\bird.jpg --json
+python -m whatbird.cli detect D:\photos\bird.jpg --overlay D:\out\bird-boxes.png
+python -m whatbird.cli detect D:\photos\*.jpg --overlay-dir D:\out
+python -m whatbird.cli detect D:\photos\bird.jpg --device cpu --conf 0.15 --imgsz 960
+```
+
+输出示例：
+
+```
+────────────────────────────────────────────────────────────
+  鸟类位置检测  D:\photos\bird.jpg
+  图像 6000×4000
+  设备 xpu ｜ 模型 yolo11n.pt
+────────────────────────────────────────────────────────────
+  检测到 2 只鸟（按置信度降序）
+  #1  框 x=3012 y=1988 w=820 h=640 ｜ 相对位置 50.2%/49.7% ｜ 置信度 91%
+  #2  框 x=1180 y=2400 w=360 h=300 ｜ 相对位置 19.7%/60.0% ｜ 置信度 62%
+
+  耗时 0.28s
+```
+
+`--overlay` 会生成一张**原分辨率的标注图**：每个框描黑边 + 橙红框，框上方写 `BIRD 0.91`
+（多只时带 `#1` 序号），左上角图例给出数量与推理设备。文字只用 ASCII，不依赖中文字体。
+
+常用参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `--json` | 机器可读输出（单张给对象，多张给 `{total, items}`） |
+| `--overlay` / `--overlay-dir` | 保存画框标注图（单张用前者，多张用后者，文件名 `<原名>.detect.png`） |
+| `--device auto\|xpu\|cpu` | 推理设备；默认 `auto` = 有 Intel 显卡就用，否则 CPU |
+| `--model` / `--model-dir` | 权重名或本地权重路径；权重目录默认 `~/.whatbird/models` |
+| `--conf 0.25` | 置信度阈值，调低能召回更小/更远的鸟 |
+| `--imgsz 640` | 推理分辨率，调到 960 / 1280 更容易抓到远处小鸟（更慢） |
+| `--iou 0.7` | NMS 的 IoU 阈值，控制同一只鸟的重复框 |
+| `--all-classes` | 不限制类别（默认只检测鸟；其他类别仍只列入「画面里还有」而不算结果） |
+
+> 默认只报鸟：预训练权重是 COCO 80 类，`bird` 是独立类别（id 14）。画面里的狗、人、车会被
+> 列在「已按参数过滤」里，用来解释「为什么有目标却没报鸟」。
+> 首次运行会下载 YOLO 权重到 `~/.whatbird/models`；国内下载失败时给出手动放置办法。
+> 模型选择、坐标约定、性能与边界见 [`docs/bird-detection.md`](docs/bird-detection.md)。
+
+---
+
 ## 5. 使用方式二：Web 界面（UI -> core）
 
 ```bash
@@ -284,7 +444,13 @@ python -m whatbird.cli serve --port 8000
 | POST | `/api/batch/start-paths` | 批量：传入多个服务器路径，立即返回任务号 |
 | GET | `/api/batch/{job_id}` | 批量：查询进度（当前第几张、已完成结果） |
 | POST | `/api/batch/{job_id}/stop` | 批量：终止任务 |
+| POST | `/api/focus` | 上传单张 jpg 分析对焦点（纯本地算法） |
+| POST | `/api/focus-path` | 传入服务器上的 jpg 路径分析对焦点 |
 | GET | `/docs` | 自动生成的 OpenAPI 文档 |
+
+> **`/api/focus*` 是纯本地算法**：不调用方舟、不消耗额度、不需要 API Key，
+> 亚秒级返回。响应为 `{"result": {...}, "overlay": "data:image/png;base64,..."}`，
+> 其中 `overlay` 就是画好标记的原图，前端直接塞进 `<img src>` 即可。
 
 > 批量识别走「启动任务 → 轮询进度 → 可终止」的模式：终止会取消正在等待的上游请求，
 > 未开始的图片根本不会发出，避免白花额度。单张识别在界面上走的是同一套流程，
@@ -299,6 +465,13 @@ curl -X POST http://127.0.0.1:8000/api/recognize-path ^
   -H "X-WhatBird-Client: 1" ^
   -d "{\"path\": \"D:\\\\photos\\\\bird.jpg\"}"
 ```
+
+### 网页上的对焦点分析
+
+页面下方的「3 · 对焦点分析」卡片：选好图片（或填好路径）后点按钮即可，**不需要先配置 API Key**。
+结果区会显示标注图 + 两条路线各自的坐标与置信度 + 一致性结论。
+红色 `EXIF AF` 是相机元数据记录的对焦点，青色 `CONTENT PEAK` 是画面实际最清晰处——
+两种颜色和图上的标记一致，重合时一眼就能看出两条路线互相印证。
 
 ---
 
@@ -342,6 +515,13 @@ python -m pytest
 - `tests/test_frontend.py` 做**前端契约检查**：JS 里引用的元素 id / 类名 / 接口路径必须真实存在，
   并守住「`hidden` 必须真的隐藏」这条样式兜底规则 —— 这类问题不会有编译期报错，
   却会让向导整页点不动或遮罩一直挡住界面。
+- 对焦分析的测试分两类：
+  - **合成样本**（`test_focus_content.py` / `test_focus_exif.py` / `test_focus_overlay.py`）：真值可控、
+    完全确定性，不需要任何真实照片。定位精度、失焦边缘抗干扰、缩放回映射、8 种朝向、
+    GPS 不泄漏都在这里覆盖。
+  - **真实样张**（`test_focus_samples.py`）：只有 `samples/` 里放了相机原片时才跑，否则整体 skip。
+    这一组用来验证厂商 MakerNote 的坐标语义（合成样本验证不了）。约定见
+    [`samples/README.md`](samples/README.md)。
 
 ---
 
@@ -350,7 +530,9 @@ python -m pytest
 - API Key 只存在于 `~/.whatbird/config.json`（用户目录），**不在仓库内**；
 - `save_config()` 会拒绝把配置写进仓库目录；
 - 所有对外输出（API 响应、CLI 展示、日志）默认使用脱敏 Key；
-- `.gitignore` 额外忽略 `config/*.json`、`.env`、`*.key` 等，作为兜底。
+- 对焦分析读 EXIF 时**只取白名单标签**（`make / model / tag / raw_value`），
+  GPS 等敏感信息不会出现在任何输出里（有回归测试钉死）；
+- `.gitignore` 额外忽略 `config/*.json`、`.env`、`*.key`、`samples/*` 等，作为兜底。
 
 ---
 
@@ -365,6 +547,15 @@ python -m pytest
 | `HTTP 429 触发限流` | 稍后重试，或降低调用频率 |
 | 后缀是 jpg 但报「无法解析」 | 文件损坏或只是改了后缀，`Pillow` 在本地就拦下了 |
 | 结果里分类学信息为空 | 模型没给出，可重试；识别结果仅供参考，请结合实际观察 |
+| 对焦点分析说「没有可用的 EXIF 对焦信息」 | 正常：截图、社交软件转存、部分手机照片本来就没有 MakerNote。内容分析路线不受影响 |
+| 对焦点分析说「整图清晰度差异极小，没有唯一的对焦点」 | 正常，**不是报错**：满是纹理的画面（树冠、草丛）里到处都一样锐，本来就没有唯一对焦点。程序仍会列出最锐处与候选点 |
+| `缺少依赖 opencv-python-headless / numpy` | `python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt` |
+| `detect` 报「缺少依赖：ultralytics / torch」 | 位置检测是**可选**能力，装法见第 2 节「可选：安装鸟类位置检测依赖」（三条命令，注意 `--no-deps`） |
+| `detect` 报「加载 YOLO 权重失败」或一直卡在下载 | 首次会下载权重到 `~/.whatbird/models`，国内可能失败。手动下载 `yolo11n.pt` 放进该目录，或 `--model D:\models\yolo11n.pt` 指定本地路径 |
+| pip 报 `ultralytics requires opencv-python / polars / nvidia-ml-py` | `--no-deps` 的正常产物：`cv2` 由 `opencv-python-headless` 提供，另两个推理不用。**不要**为了消掉这几行 warning 去装 GUI 版 opencv |
+| `detect --device xpu` 报「检测不到可用的 XPU 设备」 | torch 装成了 CPU 版，或驱动过旧/显卡被独占。先跑 `python -c "import torch;print(torch.xpu.is_available())"`；急用可 `--device cpu` |
+| `detect` 结果里一条鸟都没有 | 看输出的「说明」：可能确实没鸟、鸟太小太远、或被遮挡。可调低 `--conf 0.15`、把 `--imgsz` 提到 960/1280 再试 |
+| `detect` 把非鸟物体框成鸟 | 预训练权重只认 COCO 的 80 类，误检难免。提高 `--conf` 或 `--imgsz` 通常能压掉；要更准需要换更大的权重（`--model yolo11s.pt` 等） |
 
 ---
 
@@ -372,4 +563,25 @@ python -m pytest
 
 - 仅接受 `.jpg / .jpeg`（`Agent.md` 第 6 条），其他格式会给出明确提示；
 - 单次只识别一张图、图中一只主鸟；
-- 识别结果由大模型生成，**不构成严谨的物种鉴定结论**。
+- 识别结果由大模型生成，**不构成严谨的物种鉴定结论**；
+- 对焦点分析：
+  - **不判断"对焦点是否落在鸟身上"**。本功能不做目标检测，只回答"哪里最清晰"，
+    背景比主体更锐时会如实指向背景；
+  - **满是纹理的画面里判别力有限**。树冠、草丛这类场景到处都是强边缘，
+    "哪里最锐"和"哪里景深最浅"不是一回事；此时程序会明说没有唯一对焦点，
+    并列出候选点 —— 实测一张 OM-1 的树冠啄木鸟照片就是这个结论；
+  - 景深极大（风景小光圈）或整张失焦时**不会有明确答案**，程序会明说找不到，
+    而不是硬编一个坐标；
+  - EXIF 路线里**尼康 DSLR 的网格型 AF 点尚未换算成像素坐标**（不同机型点位表不同，
+    在拿到真机样张前猜出来的坐标错得概率更大），当前只上报"相机记了 AF 数据"；
+    **索尼的 `FocusLocation` 私有坐标系**、以及 **OM System / OM-1** 的 MakerNote
+    （`OM SYSTEM` 私有头，Pillow 与 ExifRead 都会跳过）均尚未解析；
+  - 佳能 / 富士的 MakerNote 坐标语义已实现但**还需要真实相机原片验证**
+    （见 [`samples/README.md`](samples/README.md)）。
+- 鸟类位置检测：
+  - **只给位置，不给种类**。识别种类请用 `identify`（第 4 节）；当前不做"检测 + 逐只裁剪送模型"
+    （代码结构已预留，见 [`docs/bird-detection.md`](docs/bird-detection.md)）；
+  - Web 界面**还没有**接位置检测，只有 CLI（`whatbird detect`）与 Python API（`detect_birds()`）；
+  - 用的是 COCO 预训练权重，鸟只有**一个笼统的 "bird" 类别**（不区分种类）。常见场景够用，
+    但**小型远距鸟、强烈遮挡、罕见姿态/侧面剪影会漏检**；鸟占画面比例很小时需要把 `--imgsz` 调大；
+  - 纯检测，不做"这是不是同一只鸟"的跟踪或去重；

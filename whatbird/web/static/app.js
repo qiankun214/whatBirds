@@ -880,6 +880,7 @@
       list.appendChild(li);
     });
     list.hidden = files.length <= 1;
+    setFocusBusy(false);
   }
 
   function parsePaths() {
@@ -928,6 +929,142 @@
       paths.length,
       paths.length > 1 ? "正在依次识别 " + paths.length + " 张图片…" : "正在调用 Doubao-Seed-2.1 识别…"
     );
+  }
+
+  // ------------------------------------------------------------ 对焦点分析
+  // 纯本地算法：不调用方舟、不消耗额度，所以这里刻意**不做** requireConfigured 检查。
+  function showFocusError(message) {
+    setMessage($("focus-error"), message || "", "error");
+  }
+
+  function percent(value) {
+    var number = typeof value === "number" && isFinite(value) ? value : 0;
+    return Math.round(number * 100) + "%";
+  }
+
+  function setFocusBusy(busy) {
+    var upload = $("btn-focus-upload");
+    var byPath = $("btn-focus-path");
+    upload.disabled = !!busy || !(state.files || []).length;
+    byPath.disabled = !!busy;
+    upload.textContent = busy ? "分析中…" : "分析已选图片的第一张";
+  }
+
+  function focusRouteRow(tbody, route, hit) {
+    var isExif = route === "exif";
+    var tr = document.createElement("tr");
+
+    var nameCell = document.createElement("td");
+    nameCell.className = isExif ? "route-exif" : "route-content";
+    nameCell.textContent = isExif ? "EXIF 元数据" : "内容分析";
+    tr.appendChild(nameCell);
+
+    if (!hit.found) {
+      var missing = document.createElement("td");
+      missing.className = "missing";
+      missing.colSpan = 3;
+      missing.textContent = "没有结论：" + (hit.detail || "—");
+      tr.appendChild(missing);
+      tbody.appendChild(tr);
+      return;
+    }
+
+    var pointCell = document.createElement("td");
+    pointCell.textContent = "(" + hit.x + ", " + hit.y + ")";
+    var detail = document.createElement("span");
+    detail.className = "route-detail";
+    detail.textContent = hit.detail || "";
+    pointCell.appendChild(detail);
+    tr.appendChild(pointCell);
+
+    appendCell(tr, percent(hit.x_ratio) + " / " + percent(hit.y_ratio));
+    appendCell(tr, percent(hit.confidence));
+    tbody.appendChild(tr);
+  }
+
+  function renderFocus(payload) {
+    var result = payload.result || {};
+    var exif = result.exif || {};
+    var content = result.content || {};
+    var image = result.image || {};
+
+    $("focus-empty").hidden = true;
+    $("focus-body").hidden = false;
+
+    var rows = $("focus-rows");
+    rows.innerHTML = "";
+    focusRouteRow(rows, "exif", exif);
+    focusRouteRow(rows, "content", content);
+
+    var verdict = $("focus-verdict");
+    if (exif.found && content.found) {
+      if (result.agree) {
+        verdict.className = "focus-verdict";
+        verdict.textContent = "两条路线一致：相机记录的对焦点与画面实际最清晰处互相印证。";
+      } else {
+        verdict.className = "focus-verdict is-disagree";
+        verdict.textContent = "两条路线不一致：相机声称的对焦点与画面实际最清晰处不同，值得看一眼。";
+      }
+    } else if (exif.found || content.found) {
+      verdict.className = "focus-verdict is-disagree";
+      verdict.textContent = "只有一条路线给出了结论（另一条的原因见上表）。";
+    } else {
+      verdict.className = "focus-verdict is-none";
+      verdict.textContent = "两条路线都没能定位对焦点。";
+    }
+
+    var region = result.region;
+    $("focus-region").textContent = region
+      ? "合焦区域：x " + region.x + "、y " + region.y + "，" + region.width + "×" + region.height +
+        "，占画面 " + percent(region.area_ratio)
+      : "";
+
+    var notes = result.notes || [];
+    $("focus-notes-wrap").hidden = notes.length === 0;
+    renderList($("focus-notes"), notes, function (li, note) { li.textContent = note; });
+
+    var others = (result.candidates || []).slice(1);
+    $("focus-candidates-wrap").hidden = others.length === 0;
+    renderList($("focus-candidates"), others, function (li, item) {
+      li.textContent = "(" + item.x + ", " + item.y + ")　相对锐度 " + percent(item.score);
+    });
+
+    var elapsed = typeof result.elapsed_seconds === "number" ? result.elapsed_seconds : 0;
+    $("focus-meta").textContent =
+      image.width + "×" + image.height +
+      " ｜ 分析尺度 " + image.analyzed_width + "×" + image.analyzed_height +
+      " ｜ " + elapsed.toFixed(2) + "s";
+    $("focus-overlay").src = payload.overlay || "";
+  }
+
+  async function runFocus(url, options) {
+    showFocusError("");
+    setFocusBusy(true);
+    try {
+      renderFocus(await api(url, options));
+    } catch (err) {
+      showFocusError(err.message || String(err));
+    } finally {
+      setFocusBusy(false);
+    }
+  }
+
+  async function analyzeFocusUpload() {
+    var files = state.files || [];
+    if (!files.length) { showFocusError("请先在上方选择至少一张 jpg 图片。"); return; }
+    var form = new FormData();
+    form.append("file", files[0]);
+    await runFocus("/api/focus", { method: "POST", body: form });
+  }
+
+  async function analyzeFocusPath() {
+    var paths = parsePaths();
+    if (!paths.length) { showFocusError("请先在上方填写一个 jpg 文件路径。"); return; }
+    await runFocus("/api/focus-path", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: paths[0] })
+    });
   }
 
   // ------------------------------------------------------------ 事件绑定
@@ -985,9 +1122,13 @@
     $("btn-recognize-path").addEventListener("click", recognizePath);
     $("btn-stop").addEventListener("click", stopBatch);
     $("btn-export").addEventListener("click", exportBatchJson);
+    $("btn-focus-upload").addEventListener("click", analyzeFocusUpload);
+    $("btn-focus-path").addEventListener("click", analyzeFocusPath);
     $("path-input").addEventListener("keydown", function (event) {
       if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { recognizePath(); }
     });
+
+    setFocusBusy(false);
 
     var config = await loadConfig();
     if (config) {

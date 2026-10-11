@@ -296,3 +296,48 @@ code {
 .summary div:last-child { border-bottom: 0; }
 .summary dt { flex: 0 0 96px; color: var(--ink-soft); margin: 0; font-size: 13px; }
 .summary dd { margin: 0; word-break: break-all; }
+
+/* ---------------------------------------------------------------- 对焦点分析 */
+/* 两种标记的颜色必须和 core/focus/overlay.py 里画在图上的一致，
+   否则「图上的颜色」和「页面上文字的颜色」对不上，用户会看懵。 */
+.focus-legend-exif { color: #c8231a; }
+.focus-legend-content { color: #0a7f96; }
+
+.focus-card { margin-top: 18px; display: block; }
+.focus-card .row-actions { margin: 14px 0 6px; }
+.focus-card .empty { margin-top: 12px; }
+
+.focus-grid {
+  display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 18px; margin-top: 14px; align-items: start;
+}
+.focus-image {
+  background: #f0f2f0; border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px; display: grid; place-items: center;
+}
+.focus-image img { max-width: 100%; height: auto; border-radius: 6px; display: block; }
+
+.focus-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.focus-table th {
+  text-align: left; font-weight: 600; color: var(--ink-soft);
+  font-size: 12.5px; padding: 6px 8px; border-bottom: 1px solid var(--line);
+}
+.focus-table td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.focus-table tr:last-child td { border-bottom: 0; }
+.focus-table .route-exif { color: #c8231a; font-weight: 600; }
+.focus-table .route-content { color: #0a7f96; font-weight: 600; }
+.focus-table .missing { color: var(--ink-soft); }
+.focus-table .route-detail { display: block; color: var(--ink-soft); font-size: 12.5px; margin-top: 2px; }
+
+.focus-verdict {
+  margin: 14px 0 6px; padding: 9px 12px; border-radius: 10px;
+  background: var(--brand-soft); color: var(--brand-dark); font-size: 13.5px; font-weight: 600;
+}
+.focus-verdict.is-disagree { background: var(--warn-bg); color: #8a5a12; }
+.focus-verdict.is-none { background: #f1f3f1; color: var(--ink-soft); }
+
+.focus-detail h4 { margin: 14px 0 6px; font-size: 13.5px; }
+
+@media (max-width: 820px) {
+  .focus-grid { grid-template-columns: 1fr; }
+}

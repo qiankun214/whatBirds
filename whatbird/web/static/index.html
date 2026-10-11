@@ -138,6 +138,60 @@
       </section>
     </main>
 
+    <!-- ===================== 对焦点分析 ===================== -->
+    <section class="card focus-card">
+      <div class="card-head">
+        <h2>3 · 对焦点分析</h2>
+        <span id="focus-meta" class="muted"></span>
+      </div>
+
+      <p class="muted">
+        <strong>纯本地算法</strong>：不调用方舟、不消耗额度、不需要 API Key。同时跑两条互相独立的路线并都上报 ——
+        <strong class="focus-legend-exif">红色的 EXIF AF</strong> 是相机元数据里记录的对焦点（相机<em>声称</em>对在哪），
+        <strong class="focus-legend-content">青色的 CONTENT PEAK</strong> 是用传统图形学算法分析像素清晰度
+        得到的画面实际最清晰处。
+      </p>
+
+      <div class="row-actions">
+        <button id="btn-focus-upload" class="btn btn-primary" type="button" disabled>分析已选图片的第一张</button>
+        <button id="btn-focus-path" class="btn" type="button">分析已填路径的第一个</button>
+      </div>
+
+      <div id="focus-error" class="alert alert-error" hidden></div>
+
+      <div id="focus-empty" class="empty">
+        <span class="empty-icon">🎯</span>
+        <p>分析结果会显示在这里：两条路线各自的对焦点坐标、置信度，以及原图上的标注。</p>
+        <p class="muted small">在上方选择图片或填写路径后，点上面的按钮即可（不会调用模型）。</p>
+      </div>
+
+      <div id="focus-body" hidden>
+        <div class="focus-grid">
+          <div class="focus-image">
+            <img id="focus-overlay" alt="对焦点标注图" />
+          </div>
+          <div class="focus-detail">
+            <table class="focus-table">
+              <thead>
+                <tr><th>路线</th><th>对焦点</th><th>相对位置</th><th>置信度</th></tr>
+              </thead>
+              <tbody id="focus-rows"></tbody>
+            </table>
+            <p id="focus-verdict" class="focus-verdict"></p>
+            <p id="focus-region" class="muted small"></p>
+            <div id="focus-notes-wrap" hidden>
+              <h4>说明</h4>
+              <ul id="focus-notes" class="list"></ul>
+            </div>
+            <div id="focus-candidates-wrap" hidden>
+              <h4>其他候选点</h4>
+              <ul id="focus-candidates" class="list"></ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <footer class="footer">
       <span id="footer-config">WhatBird · core / CLI / Web 前后端分离</span>
       <span>识别结果由大模型生成，请结合实际观察核对。</span>

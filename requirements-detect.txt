@@ -1,0 +1,41 @@
+# Optional detection dependencies (YOLO bird localisation). NOT needed to run
+# the Ark recogniser or the focus analyser - install only if you want
+# `whatbird detect` / `detect_birds()`.
+#
+# Keep this file ASCII-only: pip reads requirements files with the system
+# locale encoding (GBK on Chinese Windows), so non-ASCII comments can raise
+# UnicodeDecodeError.
+#
+# Install order matters, in three separate commands:
+#
+#   1) torch + torchvision MUST come from PyTorch's XPU index. The default
+#      PyPI/mirror wheels are CPU-only and cannot see an Intel GPU:
+#        python -m pip install -i https://download.pytorch.org/whl/xpu torch==2.8.0 torchvision==0.23.0
+#
+#   2) ultralytics MUST be installed with --no-deps:
+#        python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-deps ultralytics==8.4.175
+#      Why: ultralytics declares opencv-python>=4.7.0 (the GUI build). Installing it
+#      replaces this project's deliberate opencv-python-headless, whose whole point is
+#      having no GUI dependency (see requirements.txt). ultralytics only uses cv2 image
+#      ops, so headless satisfies it. polars / nvidia-ml-py are declared but never
+#      touched by inference (verified), so skipping them keeps ~100 MB out of the venv.
+#
+#   3) fill in the runtime deps --no-deps skipped:
+#        python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pyyaml scipy psutil py-cpuinfo ultralytics-thop
+#
+# Verify (must print 2.8.0+xpu / True):
+#   python -c "import torch;print(torch.__version__, torch.xpu.is_available())"
+#
+# Licence note: ultralytics is AGPL-3.0. Fine for local personal use; if this
+# project is ever shipped or embedded in a product, that licence propagates.
+#
+# The torch line is informational: step 1 already installs it (the +xpu suffix
+# cannot be resolved from a plain PyPI index).
+torch==2.8.0+xpu
+torchvision==0.23.0+xpu
+ultralytics==8.4.175
+pyyaml==6.0.3
+scipy==1.16.2
+psutil==7.1.2
+py-cpuinfo==9.0.0
+ultralytics-thop==2.2.2

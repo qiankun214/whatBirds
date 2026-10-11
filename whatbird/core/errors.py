@@ -33,3 +33,20 @@ class ModelCallError(WhatBirdError):
 
 class ResponseParseError(WhatBirdError):
     """模型返回的内容不是可解析的 JSON 结构。"""
+
+
+class FocusDependencyError(WhatBirdError):
+    """对焦分析所需的第三方库未安装（opencv-python-headless / numpy / exifread）。
+
+    独立成一个异常类型，是为了让 CLI 与 Web 都能给出「按清华镜像装哪个包」的中文提示，
+    而不是抛裸 ``ImportError`` 让用户看栈。
+    """
+
+
+class DetectorDependencyError(WhatBirdError):
+    """鸟类位置检测所需的第三方库或权重不可用（ultralytics / torch(+xpu) / 模型文件）。
+
+    与 :class:`FocusDependencyError` 同样的理由独立成一个类型：检测能力是**可选**的
+    （见 requirements-detect.txt），没装时 ``import whatbird.core`` 与其余功能必须照常可用，
+    只有真正调用检测时才用这个异常给出中文安装提示。
+    """

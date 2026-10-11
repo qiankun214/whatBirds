@@ -15,8 +15,12 @@ POST                         /api/batch/start-upload  批量：上传多张图�
 POST                         /api/batch/start-paths   批量：传入多个服务器路径，返回任务号
 GET                          /api/batch/{job_id}      批量：查询进度与已完成的结果
 POST                         /api/batch/{job_id}/stop 批量：终止任务
+POST                         /api/focus           上传单张 jpg 分析对焦点（EXIF + 内容分析）
+POST                         /api/focus-path      传入服务器上的 jpg 路径分析对焦点
 GET                          /                    静态前端页面（含配置向导）
 ===========================  ======  =================================================
+
+对焦分析接口是**纯本地算法**：不调用方舟、不消耗额度、无需配置 API Key。
 
 安全说明（本地工具，仍需防护）：
 - 所有会改动状态或消耗额度的接口都要求请求头 ``X-WhatBird-Client: 1``。
@@ -45,8 +49,11 @@ from ..core import (
     ModelCallError,
     ResponseParseError,
     WhatBirdError,
+    analyze_focus,
     config_file_status,
     load_config,
+    overlay_data_url,
+    render_focus_overlay,
     save_config,
 )
 from ..core.config import ArkConfig, mask_secret
@@ -110,6 +117,12 @@ class BatchPathsRequest(BaseModel):
     """批量：按服务器本地路径列表依次识别。"""
 
     paths: List[str] = Field(description="服务器上可访问的 jpg / jpeg 路径列表，按顺序识别")
+
+
+class FocusPathRequest(BaseModel):
+    """按服务器本地路径分析对焦点。"""
+
+    path: str = Field(description="服务器上可访问的 jpg / jpeg 文件路径")
 
 
 def require_client_header(x_whatbird_client: Optional[str] = Header(default=None)) -> None:
@@ -347,6 +360,36 @@ def create_app() -> FastAPI:
             "status": job.status,
             "message": "已发送终止请求" if stopped else "该任务已经结束",
         }
+
+    # ----------------------------------------------------------- 对焦点分析
+    def focus_response(source: ImageSource) -> dict[str, Any]:
+        """跑两条路线并附上标注图。
+
+        纯本地算法，亚秒级完成，所以同步返回即可，不需要像批量识别那样起后台任务。
+        """
+        report = analyze_focus(source)
+        overlay = render_focus_overlay(source, report)
+        return {"result": report.to_dict(), "overlay": overlay_data_url(overlay)}
+
+    @app.post("/api/focus", tags=["focus"], dependencies=[Depends(require_client_header)])
+    def focus_upload(file: UploadFile = File(...)) -> dict[str, Any]:
+        """上传一张 jpg，返回对焦点分析结果 + 原图上的标注图。"""
+        data = file.file.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"图片过大（{len(data) / 1024 / 1024:.1f} MB），上限 {MAX_UPLOAD_BYTES // 1024 // 1024} MB",
+            )
+        return focus_response(ImageSource.from_bytes(file.filename or "<upload>", data))
+
+    @app.post(
+        "/api/focus-path",
+        tags=["focus"],
+        dependencies=[Depends(require_client_header)],
+    )
+    def focus_path(payload: FocusPathRequest) -> dict[str, Any]:
+        """传入服务器上的 jpg 路径，返回对焦点分析结果 + 标注图。"""
+        return focus_response(ImageSource.from_path(payload.path))
 
     # ----------------------------------------------------------- 静态前端
     if STATIC_DIR.is_dir():
