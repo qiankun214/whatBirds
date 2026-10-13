@@ -17,10 +17,13 @@ GET                          /api/batch/{job_id}      批量：查询进度与�
 POST                         /api/batch/{job_id}/stop 批量：终止任务
 POST                         /api/focus           上传单张 jpg 分析对焦点（EXIF + 内容分析）
 POST                         /api/focus-path      传入服务器上的 jpg 路径分析对焦点
+POST                         /api/detect          上传单张 jpg 做鸟类位置检测（本地 YOLO）
+POST                         /api/detect-path     传入服务器上的 jpg 路径做鸟类位置检测
 GET                          /                    静态前端页面（含配置向导）
 ===========================  ======  =================================================
 
-对焦分析接口是**纯本地算法**：不调用方舟、不消耗额度、无需配置 API Key。
+对焦分析与位置检测都是**纯本地能力**：不调用方舟、不消耗额度、无需配置 API Key。
+区别是位置检测**依赖可选包**（ultralytics + torch）与一份 YOLO 权重，缺了会返回带中文安装提示的 400。
 
 安全说明（本地工具，仍需防护）：
 - 所有会改动状态或消耗额度的接口都要求请求头 ``X-WhatBird-Client: 1``。
@@ -35,7 +38,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, List, Optional
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -51,12 +54,15 @@ from ..core import (
     WhatBirdError,
     analyze_focus,
     config_file_status,
+    detect_birds,
     load_config,
     overlay_data_url,
+    render_bird_overlay,
     render_focus_overlay,
     save_config,
 )
 from ..core.config import ArkConfig, mask_secret
+from ..core.detect.models import COCO_BIRD_CLASSES, DEFAULT_CONF, DEFAULT_IMGSZ, DetectParams
 from .jobs import BatchJobManager
 
 #: 上传大小上限：20 MB（远超模型需要，纯粹防误操作）
@@ -123,6 +129,33 @@ class FocusPathRequest(BaseModel):
     """按服务器本地路径分析对焦点。"""
 
     path: str = Field(description="服务器上可访问的 jpg / jpeg 文件路径")
+
+
+class DetectPathRequest(BaseModel):
+    """按服务器本地路径做鸟类位置检测（可以覆盖推理参数）。
+
+    参数默认值与 CLI 完全一致；上传接口用表单字段收同一组参数。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str = Field(description="服务器上可访问的 jpg / jpeg 文件路径")
+    conf: float = Field(
+        default=DEFAULT_CONF,
+        ge=0.01,
+        le=1.0,
+        description="置信度阈值，调低能召回更小/更远的鸟（默认 0.25）",
+    )
+    imgsz: int = Field(
+        default=DEFAULT_IMGSZ,
+        ge=320,
+        le=1920,
+        description="推理分辨率，960/1280 更容易抓到远处小鸟（更慢，默认 640）",
+    )
+    all_classes: bool = Field(
+        default=False,
+        description="把非鸟目标也算作结果；默认只把鸟算结果，非鸟类别只列在说明里",
+    )
 
 
 def require_client_header(x_whatbird_client: Optional[str] = Header(default=None)) -> None:
@@ -390,6 +423,64 @@ def create_app() -> FastAPI:
     def focus_path(payload: FocusPathRequest) -> dict[str, Any]:
         """传入服务器上的 jpg 路径，返回对焦点分析结果 + 标注图。"""
         return focus_response(ImageSource.from_path(payload.path))
+
+    # ----------------------------------------------------------- 鸟类位置检测
+    def detect_response(
+        source: ImageSource,
+        *,
+        conf: float,
+        imgsz: int,
+        all_classes: bool,
+    ) -> dict[str, Any]:
+        """跑一次本地 YOLO 推理并附上画框标注图。
+
+        与对焦点分析同样是纯本地、同步返回（不调用方舟、不消耗额度、不需要 API Key）。
+        区别是**多了可选依赖**：没装 ultralytics / torch、或权重不在本地时，core 会抛
+        :class:`DetectorDependencyError`，由统一异常处理器翻成带中文安装提示的 400。
+        """
+        params = DetectParams(
+            conf=conf,
+            imgsz=imgsz,
+            classes=() if all_classes else COCO_BIRD_CLASSES,
+        )
+        report = detect_birds(source, params=params)
+        overlay = render_bird_overlay(source, report)
+        return {"result": report.to_dict(), "overlay": overlay_data_url(overlay)}
+
+    @app.post("/api/detect", tags=["detect"], dependencies=[Depends(require_client_header)])
+    def detect_upload(
+        file: UploadFile = File(...),
+        conf: float = Form(DEFAULT_CONF),
+        imgsz: int = Form(DEFAULT_IMGSZ),
+        all_classes: bool = Form(False),
+    ) -> dict[str, Any]:
+        """上传一张 jpg，返回每一只鸟的位置 + 原图上的画框标注。"""
+        data = file.file.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"图片过大（{len(data) / 1024 / 1024:.1f} MB），上限 {MAX_UPLOAD_BYTES // 1024 // 1024} MB",
+            )
+        return detect_response(
+            ImageSource.from_bytes(file.filename or "<upload>", data),
+            conf=conf,
+            imgsz=imgsz,
+            all_classes=all_classes,
+        )
+
+    @app.post(
+        "/api/detect-path",
+        tags=["detect"],
+        dependencies=[Depends(require_client_header)],
+    )
+    def detect_path(payload: DetectPathRequest) -> dict[str, Any]:
+        """传入服务器上的 jpg 路径，返回每一只鸟的位置 + 画框标注。"""
+        return detect_response(
+            ImageSource.from_path(payload.path),
+            conf=payload.conf,
+            imgsz=payload.imgsz,
+            all_classes=payload.all_classes,
+        )
 
     # ----------------------------------------------------------- 静态前端
     if STATIC_DIR.is_dir():

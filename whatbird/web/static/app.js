@@ -881,6 +881,7 @@
     });
     list.hidden = files.length <= 1;
     setFocusBusy(false);
+    setDetectBusy(false);
   }
 
   function parsePaths() {
@@ -1067,6 +1068,99 @@
     });
   }
 
+  // ------------------------------------------------------------ 鸟类位置检测
+  // 与对焦点分析同样是纯本地能力：不调用方舟、不消耗额度，所以也不做 requireConfigured 检查。
+  function showDetectError(message) {
+    setMessage($("detect-error"), message || "", "error");
+  }
+
+  function setDetectBusy(busy) {
+    var upload = $("btn-detect-upload");
+    var byPath = $("btn-detect-path");
+    upload.disabled = !!busy || !(state.files || []).length;
+    byPath.disabled = !!busy;
+    upload.textContent = busy ? "检测中…" : "检测已选图片的第一张";
+  }
+
+  function renderDetect(payload) {
+    var result = payload.result || {};
+    var image = result.image || {};
+    var items = result.birds || [];
+
+    $("detect-empty").hidden = true;
+    $("detect-body").hidden = false;
+
+    var rows = $("detect-rows");
+    rows.innerHTML = "";
+    items.forEach(function (item, index) {
+      var name = item.class_name && item.class_name !== "bird" ? " " + item.class_name : "";
+      var tr = document.createElement("tr");
+      appendCell(tr, "#" + (index + 1) + name);
+      appendCell(tr, "x=" + item.x + " y=" + item.y + " w=" + item.width + " h=" + item.height);
+      appendCell(tr, percent(item.x_ratio) + " / " + percent(item.y_ratio));
+      appendCell(tr, percent(item.confidence));
+      rows.appendChild(tr);
+    });
+
+    var verdict = $("detect-verdict");
+    if (items.length) {
+      verdict.className = "focus-verdict";
+      verdict.textContent = "检测到 " + items.length + " 个目标"
+        + (result.found ? "（其中有鸟）" : "") + "。框已画在下图的原分辨率图上。";
+    } else {
+      verdict.className = "focus-verdict is-none";
+      verdict.textContent = "没有检测到鸟：可能画面里确实没有鸟，也可能是鸟太小、太远或被遮挡。";
+    }
+
+    var others = result.other_classes || [];
+    $("detect-other-wrap").hidden = others.length === 0;
+    $("detect-other").textContent = others.length
+      ? "按参数过滤、不计入结果的目标类别：" + others.join("、")
+      : "";
+
+    var notes = result.notes || [];
+    $("detect-notes-wrap").hidden = notes.length === 0;
+    renderList($("detect-notes"), notes, function (li, note) { li.textContent = note; });
+
+    var elapsed = typeof result.elapsed_seconds === "number" ? result.elapsed_seconds : 0;
+    $("detect-meta").textContent =
+      image.width + "×" + image.height +
+      " ｜ 设备 " + (result.device || "-") +
+      " ｜ " + (result.model_name || "-") +
+      " ｜ " + elapsed.toFixed(2) + "s";
+    $("detect-overlay").src = payload.overlay || "";
+  }
+
+  async function runDetect(url, options) {
+    showDetectError("");
+    setDetectBusy(true);
+    try {
+      renderDetect(await api(url, options));
+    } catch (err) {
+      showDetectError(err.message || String(err));
+    } finally {
+      setDetectBusy(false);
+    }
+  }
+
+  async function detectUpload() {
+    var files = state.files || [];
+    if (!files.length) { showDetectError("请先在上方选择至少一张 jpg 图片。"); return; }
+    var form = new FormData();
+    form.append("file", files[0]);
+    await runDetect("/api/detect", { method: "POST", body: form });
+  }
+
+  async function detectPath() {
+    var paths = parsePaths();
+    if (!paths.length) { showDetectError("请先在上方填写一个 jpg 文件路径。"); return; }
+    await runDetect("/api/detect-path", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: paths[0] })
+    });
+  }
+
   // ------------------------------------------------------------ 事件绑定
   function bindTabs() {
     var tabs = document.querySelectorAll(".tab");
@@ -1124,11 +1218,14 @@
     $("btn-export").addEventListener("click", exportBatchJson);
     $("btn-focus-upload").addEventListener("click", analyzeFocusUpload);
     $("btn-focus-path").addEventListener("click", analyzeFocusPath);
+    $("btn-detect-upload").addEventListener("click", detectUpload);
+    $("btn-detect-path").addEventListener("click", detectPath);
     $("path-input").addEventListener("keydown", function (event) {
       if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { recognizePath(); }
     });
 
     setFocusBusy(false);
+    setDetectBusy(false);
 
     var config = await loadConfig();
     if (config) {

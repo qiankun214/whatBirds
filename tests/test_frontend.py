@@ -129,6 +129,8 @@ def test_frontend_flows_are_wired_to_endpoints():
     assert "/api/batch/" in used              # 轮询进度、终止任务
     assert "/api/focus" in used               # 对焦点分析（上传）
     assert "/api/focus-path" in used          # 对焦点分析（服务器路径）
+    assert "/api/detect" in used              # 鸟类位置检测（上传）
+    assert "/api/detect-path" in used         # 鸟类位置检测（服务器路径）
 
 
 def test_focus_panel_markup_exists():
@@ -158,6 +160,37 @@ def test_focus_panel_is_labelled_with_local_algorithm():
 
 def test_css_styles_the_focus_panel():
     for selector in (".focus-card", ".focus-grid", ".focus-image", ".focus-table", ".focus-verdict"):
+        assert selector in CSS, selector
+
+
+def test_detect_panel_markup_exists():
+    """位置检测面板的元素：两个入口按钮、标注图、结果表、结论、其他目标、说明。"""
+    for marker in (
+        'id="btn-detect-upload"',
+        'id="btn-detect-path"',
+        'id="detect-overlay"',
+        'id="detect-rows"',
+        'id="detect-verdict"',
+        'id="detect-other"',
+        'id="detect-other-wrap"',
+        'id="detect-notes"',
+        'id="detect-notes-wrap"',
+        'id="detect-error"',
+        'id="detect-empty"',
+        'id="detect-body"',
+        'id="detect-meta"',
+    ):
+        assert marker in HTML, marker
+
+
+def test_detect_panel_is_labelled_local_and_position_only():
+    """必须让用户知道：这一步不联网、以及「只给位置不给种类」。"""
+    assert "纯本地 YOLO 推理" in HTML
+    assert "只给位置、不给种类" in HTML
+
+
+def test_css_styles_the_detect_panel():
+    for selector in (".detect-card", ".detect-grid", ".detect-image", ".detect-table"):
         assert selector in CSS, selector
 
 

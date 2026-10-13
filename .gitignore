@@ -44,6 +44,10 @@ htmlcov/
 *.log
 output/
 results/
+# ultralytics 的设置目录：%APPDATA% 不可写时（受限沙箱 / CI）它会退回到当前目录，
+# 于是仓库根目录会冒出一个 Ultralytics/settings.json。用 YOLO_CONFIG_DIR 可以避免，
+# 这里只是兜底。
+Ultralytics/
 
 # ============================================================
 #  对焦分析的验证样张（用户自己的相机原片，不入库）

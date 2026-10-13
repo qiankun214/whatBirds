@@ -341,3 +341,35 @@ code {
 @media (max-width: 820px) {
   .focus-grid { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------------------------------------------- 鸟类位置检测 */
+/* 与对焦点分析同一套版式（左图右表）；结论条沿用 .focus-verdict 的配色。
+   框在图上画成橙红色，由 core/detect/overlay.py 决定，这里只负责页面文字。 */
+.detect-card { margin-top: 18px; display: block; }
+.detect-card .row-actions { margin: 14px 0 6px; }
+.detect-card .empty { margin-top: 12px; }
+.detect-card code { font-size: 12.5px; }
+
+.detect-grid {
+  display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 18px; margin-top: 14px; align-items: start;
+}
+.detect-image {
+  background: #f0f2f0; border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px; display: grid; place-items: center;
+}
+.detect-image img { max-width: 100%; height: auto; border-radius: 6px; display: block; }
+
+.detect-table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.detect-table th {
+  text-align: left; font-weight: 600; color: var(--ink-soft);
+  font-size: 12.5px; padding: 6px 8px; border-bottom: 1px solid var(--line);
+}
+.detect-table td { padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.detect-table tr:last-child td { border-bottom: 0; }
+
+.detect-detail h4 { margin: 14px 0 6px; font-size: 13.5px; }
+
+@media (max-width: 820px) {
+  .detect-grid { grid-template-columns: 1fr; }
+}

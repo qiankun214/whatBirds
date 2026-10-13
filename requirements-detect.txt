@@ -1,41 +1,55 @@
 # Optional detection dependencies (YOLO bird localisation). NOT needed to run
 # the Ark recogniser or the focus analyser - install only if you want
-# `whatbird detect` / `detect_birds()`.
+# `whatbird detect` / `detect_birds()` / the web "4 - bird position" panel.
 #
 # Keep this file ASCII-only: pip reads requirements files with the system
 # locale encoding (GBK on Chinese Windows), so non-ASCII comments can raise
 # UnicodeDecodeError.
 #
-# Install order matters, in three separate commands:
+# Install order matters, in three separate commands.
 #
-#   1) torch + torchvision MUST come from PyTorch's XPU index. The default
-#      PyPI/mirror wheels are CPU-only and cannot see an Intel GPU:
+#   1) torch + torchvision. On a CPU-only machine the Tsinghua mirror is enough:
+#      on Windows the PyPI wheels are CPU-only builds.
+#        python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple torch==2.14.1 torchvision==0.29.1
+#
+#      Only with an Intel GPU (XPU) install from PyTorch's XPU index instead:
 #        python -m pip install -i https://download.pytorch.org/whl/xpu torch==2.8.0 torchvision==0.23.0
+#      That index is NOT mirrored in mainland China and the wheel is ~1.8 GB;
+#      a resumable downloader is much safer than pip on a slow connection.
 #
 #   2) ultralytics MUST be installed with --no-deps:
-#        python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-deps ultralytics==8.4.175
-#      Why: ultralytics declares opencv-python>=4.7.0 (the GUI build). Installing it
-#      replaces this project's deliberate opencv-python-headless, whose whole point is
-#      having no GUI dependency (see requirements.txt). ultralytics only uses cv2 image
-#      ops, so headless satisfies it. polars / nvidia-ml-py are declared but never
-#      touched by inference (verified), so skipping them keeps ~100 MB out of the venv.
+#        python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-deps ultralytics==8.4.177
+#      Why: ultralytics declares opencv-python>=4.7.0 (the GUI build) and would
+#      replace this project's deliberate opencv-python-headless (see
+#      requirements.txt). It also declares polars / nvidia-ml-py / pandas /
+#      scipy, none of which the inference path imports - skipping them keeps
+#      hundreds of MB out of the venv. Verified here: `whatbird detect` runs
+#      with none of those four installed.
 #
 #   3) fill in the runtime deps --no-deps skipped:
-#        python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pyyaml scipy psutil py-cpuinfo ultralytics-thop
+#        python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pyyaml==6.0.3 psutil==7.2.2 py-cpuinfo==9.0.0 ultralytics-thop==2.2.2
 #
-# Verify (must print 2.8.0+xpu / True):
-#   python -c "import torch;print(torch.__version__, torch.xpu.is_available())"
+# Verify (a CPU build prints 2.14.1 / False):
+#   python -c "import torch;print(torch.__version__, hasattr(torch,'xpu') and torch.xpu.is_available())"
+#
+# Weights: the first run downloads yolo11n.pt (~5.4 MB) from GitHub Releases,
+# which is usually unreachable in mainland China. Use the bundled helper, which
+# walks several mirrors instead:
+#   python tools/fetch_yolo_weight.py                        # -> ~/.whatbird/models
+#   python tools/fetch_yolo_weight.py --dest .whatbird/models
+# Then point the app at that directory: CLI --model-dir, or WHATBIRD_MODEL_DIR
+# for the web server (it has no --model-dir flag of its own).
 #
 # Licence note: ultralytics is AGPL-3.0. Fine for local personal use; if this
 # project is ever shipped or embedded in a product, that licence propagates.
 #
-# The torch line is informational: step 1 already installs it (the +xpu suffix
-# cannot be resolved from a plain PyPI index).
-torch==2.8.0+xpu
-torchvision==0.23.0+xpu
-ultralytics==8.4.175
+# The versions below are the exact set measured on the current machine
+# (Windows, Python 3.10, no Intel GPU). The torch line is informational only:
+# step 1 already installs it (a +xpu suffix cannot be resolved from PyPI).
+torch==2.14.1
+torchvision==0.29.1
+ultralytics==8.4.177
 pyyaml==6.0.3
-scipy==1.16.2
-psutil==7.1.2
+psutil==7.2.2
 py-cpuinfo==9.0.0
 ultralytics-thop==2.2.2

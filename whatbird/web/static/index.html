@@ -192,6 +192,59 @@
       </div>
     </section>
 
+    <!-- ===================== 鸟类位置检测 ===================== -->
+    <section class="card detect-card">
+      <div class="card-head">
+        <h2>4 · 鸟类位置检测</h2>
+        <span id="detect-meta" class="muted"></span>
+      </div>
+
+      <p class="muted">
+        <strong>纯本地 YOLO 推理</strong>：不调用方舟、不消耗额度、不需要 API Key。
+        用 COCO 预训练权重找出画面里<strong>每一只鸟的位置</strong>（框 + 置信度），并在原分辨率图上画框。
+        它<strong>只给位置、不给种类</strong> —— 认种类请用上面的识别。
+      </p>
+
+      <div class="row-actions">
+        <button id="btn-detect-upload" class="btn btn-primary" type="button" disabled>检测已选图片的第一张</button>
+        <button id="btn-detect-path" class="btn" type="button">检测已填路径的第一个</button>
+      </div>
+
+      <div id="detect-error" class="alert alert-error" hidden></div>
+
+      <div id="detect-empty" class="empty">
+        <span class="empty-icon">🪶</span>
+        <p>检测结果会显示在这里：每一只鸟的框坐标与置信度，以及原图上的画框标注。</p>
+        <p class="muted small">首次运行需要下载约 5 MB 的 YOLO 权重；国内下载失败时可用
+          <code>python tools/fetch_yolo_weight.py</code> 换镜像下好再重试。</p>
+      </div>
+
+      <div id="detect-body" hidden>
+        <div class="detect-grid">
+          <div class="detect-image">
+            <img id="detect-overlay" alt="鸟类位置标注图" />
+          </div>
+          <div class="detect-detail">
+            <table class="detect-table">
+              <thead>
+                <tr><th>#</th><th>框（x, y, w, h）</th><th>相对位置</th><th>置信度</th></tr>
+              </thead>
+              <tbody id="detect-rows"></tbody>
+            </table>
+            <p id="detect-verdict" class="focus-verdict"></p>
+            <div id="detect-other-wrap" hidden>
+              <h4>画面里的其他目标</h4>
+              <p id="detect-other" class="muted small"></p>
+            </div>
+            <div id="detect-notes-wrap" hidden>
+              <h4>说明</h4>
+              <ul id="detect-notes" class="list"></ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <footer class="footer">
       <span id="footer-config">WhatBird · core / CLI / Web 前后端分离</span>
       <span>识别结果由大模型生成，请结合实际观察核对。</span>

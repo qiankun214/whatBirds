@@ -12,8 +12,8 @@
   找出画面里实际最清晰的位置，同时读取相机写进 EXIF 的对焦点，**两条路线都上报**并在原图上标注。
   算法细节见 [`docs/focus-algorithm.md`](docs/focus-algorithm.md)。
 - **鸟类位置检测**：用 **YOLO**（可选依赖 ultralytics + torch）找出画面里**每一只鸟的位置**（框 + 置信度），
-  并在原分辨率图上画框标注；优先使用 **Intel 显卡（XPU）** 加速，不可用时自动退回 CPU。
-  详见 [`docs/bird-detection.md`](docs/bird-detection.md)。
+  并在原分辨率图上画框标注；CLI 与**网页端**都能用（网页第 4 个卡片），有 Intel 显卡时自动用 XPU，
+  没有就用 CPU。详见 [`docs/bird-detection.md`](docs/bird-detection.md)。
 
 项目约定见 [`Agent.md`](Agent.md)（固定载入内容）：Python 工作语言、pip 用清华镜像、
 前后端分离、git 版本管理、API 配置隔离且不入库。
@@ -134,28 +134,52 @@ python -m venv .venv
 
 ### 可选：安装鸟类位置检测依赖
 
-只有要用 `whatbird detect`（YOLO 找鸟的位置）时才需要。**按顺序三条命令**，原因见
-[`requirements-detect.txt`](requirements-detect.txt) 与 [`docs/bird-detection.md`](docs/bird-detection.md)：
+只有要用 `whatbird detect`（YOLO 找鸟的位置）或网页端第 4 个卡片时才需要。
+**按顺序三条命令**，原因见 [`requirements-detect.txt`](requirements-detect.txt) 与
+[`docs/bird-detection.md`](docs/bird-detection.md)：
 
 ```bat
-:: 1) torch / torchvision 必须来自 PyTorch 官方 XPU 源（默认源是 CPU 版，用不上 Intel 显卡）
-.venv\Scripts\python.exe -m pip install -i https://download.pytorch.org/whl/xpu torch==2.8.0 torchvision==0.23.0
+:: 1) torch / torchvision：CPU 机器直接走清华镜像（Windows 上的 PyPI wheel 就是 CPU 版）
+.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple torch==2.14.1 torchvision==0.29.1
+
+::    有 Intel 显卡（XPU）时才换成官方 XPU 源；国内没有镜像、约 1.8 GB，建议断点续传下载
+:: .venv\Scripts\python.exe -m pip install -i https://download.pytorch.org/whl/xpu torch==2.8.0 torchvision==0.23.0
 
 :: 2) ultralytics 必须加 --no-deps：它会用 GUI 版 opencv-python 顶掉本项目刻意选的 headless 版
-.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-deps ultralytics==8.4.175
+.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --no-deps ultralytics==8.4.177
 
 :: 3) 补齐 --no-deps 跳过的真正运行时依赖
-.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pyyaml scipy psutil py-cpuinfo ultralytics-thop
+.venv\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple pyyaml==6.0.3 psutil==7.2.2 py-cpuinfo==9.0.0 ultralytics-thop==2.2.2
 ```
 
-装完验证（期望打印 `2.8.0+xpu True`）：
+装完验证（CPU 机器期望打印 `2.14.1 False` —— 没有 XPU 支持正是 CPU 版该有的样子）：
 
 ```bat
-.venv\Scripts\python.exe -c "import torch;print(torch.__version__, torch.xpu.is_available())"
+.venv\Scripts\python.exe -c "import torch;print(torch.__version__, hasattr(torch,'xpu') and torch.xpu.is_available())"
 ```
 
-> 装完 pip 可能报 `ultralytics requires opencv-python / polars / nvidia-ml-py` —— 这是 `--no-deps`
-> 的正常产物：`cv2` 已由 `opencv-python-headless` 提供（够用），`polars` / `nvidia-ml-py` 推理路径根本不会 import。
+> 装完 pip 可能报 `ultralytics requires opencv-python / polars / nvidia-ml-py / pandas / scipy` ——
+> 这是 `--no-deps` 的正常产物：`cv2` 已由 `opencv-python-headless` 提供，另外四项推理路径根本不会 import
+> （本机就是没装它们跑通的，实测见 [`requirements-detect.txt`](requirements-detect.txt)）。
+
+### 可选：先下好 YOLO 权重（国内必备）
+
+`ultralytics` 第一次运行会去 GitHub Releases 取 5.4 MB 的 `yolo11n.pt`，国内基本连不上。
+仓库自带一个走镜像的下载脚本（官方源 → ghfast / gh-proxy / ghproxy / hf-mirror / ModelScope 依次尝试）：
+
+```bat
+.venv\Scripts\python.exe tools\fetch_yolo_weight.py                          :: 下到 ~/.whatbird/models
+.venv\Scripts\python.exe tools\fetch_yolo_weight.py --dest .whatbird\models  :: 或者项目内目录
+.venv\Scripts\python.exe tools\fetch_yolo_weight.py --list                   :: 只列出会尝试的地址
+```
+
+下好后把目录告诉程序 —— CLI 用 `--model-dir`，网页端用环境变量 `WHATBIRD_MODEL_DIR`
+（网页端没有 `--model-dir` 可传）：
+
+```bat
+set WHATBIRD_MODEL_DIR=D:\whatBirds\.whatbird\models
+.venv\Scripts\python.exe -m whatbird.cli serve
+```
 
 
 ---
@@ -400,12 +424,18 @@ python -m whatbird.cli detect D:\photos\bird.jpg --device cpu --conf 0.15 --imgs
 | `--conf 0.25` | 置信度阈值，调低能召回更小/更远的鸟 |
 | `--imgsz 640` | 推理分辨率，调到 960 / 1280 更容易抓到远处小鸟（更慢） |
 | `--iou 0.7` | NMS 的 IoU 阈值，控制同一只鸟的重复框 |
-| `--all-classes` | 不限制类别（默认只检测鸟；其他类别仍只列入「画面里还有」而不算结果） |
+| `--all-classes` | 把非鸟目标也算作结果（默认只把鸟算结果；非鸟类别无论有没有这个开关都会列在「画面里还有」里） |
 
 > 默认只报鸟：预训练权重是 COCO 80 类，`bird` 是独立类别（id 14）。画面里的狗、人、车会被
-> 列在「已按参数过滤」里，用来解释「为什么有目标却没报鸟」。
-> 首次运行会下载 YOLO 权重到 `~/.whatbird/models`；国内下载失败时给出手动放置办法。
+> 列在「画面里还有」里，用来解释「为什么有目标却没报鸟」。这条**必须靠模型把非鸟框也返回**才成立，
+> 所以类别过滤是在 core 层事后做的，而不是丢给模型 —— 详见 [`docs/bird-detection.md`](docs/bird-detection.md) §2。
+> 权重默认放在 `~/.whatbird/models`；国内先下好用 `tools/fetch_yolo_weight.py`（见第 2 节）。
 > 模型选择、坐标约定、性能与边界见 [`docs/bird-detection.md`](docs/bird-detection.md)。
+>
+> **本机实测**（CPU-only、无 Intel 显卡，`yolo11n.pt`，810×1080 的图）：模型加载好之后单张推理
+> `--imgsz 640` 中位 **45 ms**、960 **72 ms**、1280 **124 ms**；而进程冷启动（import torch +
+> 加载权重）约 **6 s** —— 所以 CLI 单张命令的总耗时几乎全是启动开销。一次给多张图时后端按
+> 「权重 + 设备」缓存模型，第 2 张起就只剩几十毫秒。
 
 ---
 
@@ -446,11 +476,17 @@ python -m whatbird.cli serve --port 8000
 | POST | `/api/batch/{job_id}/stop` | 批量：终止任务 |
 | POST | `/api/focus` | 上传单张 jpg 分析对焦点（纯本地算法） |
 | POST | `/api/focus-path` | 传入服务器上的 jpg 路径分析对焦点 |
+| POST | `/api/detect` | 上传单张 jpg 做鸟类位置检测（纯本地 YOLO；可选表单参数 `conf` / `imgsz` / `all_classes`） |
+| POST | `/api/detect-path` | 传入服务器上的 jpg 路径做鸟类位置检测（JSON 里同样可带上面三个参数） |
 | GET | `/docs` | 自动生成的 OpenAPI 文档 |
 
 > **`/api/focus*` 是纯本地算法**：不调用方舟、不消耗额度、不需要 API Key，
 > 亚秒级返回。响应为 `{"result": {...}, "overlay": "data:image/png;base64,..."}`，
 > 其中 `overlay` 就是画好标记的原图，前端直接塞进 `<img src>` 即可。
+>
+> **`/api/detect*` 同样是纯本地**（不消耗额度、不需要 API Key），响应结构也与 focus 一致。
+> 区别是它依赖可选的 ultralytics + torch 和一份权重：缺依赖或权重时会返回 400，
+> 带中文提示（装哪个包、怎么用镜像下权重）。权重目录用环境变量 `WHATBIRD_MODEL_DIR` 指定。
 
 > 批量识别走「启动任务 → 轮询进度 → 可终止」的模式：终止会取消正在等待的上游请求，
 > 未开始的图片根本不会发出，避免白花额度。单张识别在界面上走的是同一套流程，
@@ -472,6 +508,16 @@ curl -X POST http://127.0.0.1:8000/api/recognize-path ^
 结果区会显示标注图 + 两条路线各自的坐标与置信度 + 一致性结论。
 红色 `EXIF AF` 是相机元数据记录的对焦点，青色 `CONTENT PEAK` 是画面实际最清晰处——
 两种颜色和图上的标记一致，重合时一眼就能看出两条路线互相印证。
+
+### 网页上的鸟类位置检测
+
+页面最下方的「4 · 鸟类位置检测」卡片：同样选好图片（或填好路径）后点按钮即可，**不需要 API Key**、
+**不消耗额度**（纯本地 YOLO 推理）。结果区给出标注图 + 每个框的坐标/相对位置/置信度，
+以及「画面里的其他目标」（画面里有狗、人、车却没报鸟时，用它解释原因）。
+
+它**只给位置、不给种类**：框出来的地方是不是鸟由 COCO 预训练权重判断，认种类请用上面的识别功能。
+首次使用需要一份权重（见第 2 节的下载脚本）；权重缺失、装不下、或没装 ultralytics 时，
+接口会返回带中文提示的 400，页面上直接显示这段提示。
 
 ---
 
@@ -551,9 +597,10 @@ python -m pytest
 | 对焦点分析说「整图清晰度差异极小，没有唯一的对焦点」 | 正常，**不是报错**：满是纹理的画面（树冠、草丛）里到处都一样锐，本来就没有唯一对焦点。程序仍会列出最锐处与候选点 |
 | `缺少依赖 opencv-python-headless / numpy` | `python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt` |
 | `detect` 报「缺少依赖：ultralytics / torch」 | 位置检测是**可选**能力，装法见第 2 节「可选：安装鸟类位置检测依赖」（三条命令，注意 `--no-deps`） |
-| `detect` 报「加载 YOLO 权重失败」或一直卡在下载 | 首次会下载权重到 `~/.whatbird/models`，国内可能失败。手动下载 `yolo11n.pt` 放进该目录，或 `--model D:\models\yolo11n.pt` 指定本地路径 |
+| `detect` 报「加载 YOLO 权重失败」或一直卡在下载 | 首次会去 GitHub 取权重，国内多半连不上。改用 `python tools\fetch_yolo_weight.py --dest <目录>`（走国内镜像），再用 `--model-dir <目录>`（服务端用环境变量 `WHATBIRD_MODEL_DIR`）指过去 |
+| `detect` 报「权重目录不可写」 | 默认权重目录是 `~/.whatbird/models`，受限环境下写不进去。换目录：CLI `--model-dir`，服务端 `WHATBIRD_MODEL_DIR` |
 | pip 报 `ultralytics requires opencv-python / polars / nvidia-ml-py` | `--no-deps` 的正常产物：`cv2` 由 `opencv-python-headless` 提供，另两个推理不用。**不要**为了消掉这几行 warning 去装 GUI 版 opencv |
-| `detect --device xpu` 报「检测不到可用的 XPU 设备」 | torch 装成了 CPU 版，或驱动过旧/显卡被独占。先跑 `python -c "import torch;print(torch.xpu.is_available())"`；急用可 `--device cpu` |
+| `detect --device xpu` 报「检测不到可用的 XPU 设备」 | torch 装的是 CPU 版、驱动过旧，或显卡被独占。先跑 `python -c "import torch;print(getattr(torch,'xpu',None) is not None and torch.xpu.is_available())"`（CPU 版会打印 False，而不是抛 AttributeError）；急用可 `--device cpu` |
 | `detect` 结果里一条鸟都没有 | 看输出的「说明」：可能确实没鸟、鸟太小太远、或被遮挡。可调低 `--conf 0.15`、把 `--imgsz` 提到 960/1280 再试 |
 | `detect` 把非鸟物体框成鸟 | 预训练权重只认 COCO 的 80 类，误检难免。提高 `--conf` 或 `--imgsz` 通常能压掉；要更准需要换更大的权重（`--model yolo11s.pt` 等） |
 
@@ -581,7 +628,8 @@ python -m pytest
 - 鸟类位置检测：
   - **只给位置，不给种类**。识别种类请用 `identify`（第 4 节）；当前不做"检测 + 逐只裁剪送模型"
     （代码结构已预留，见 [`docs/bird-detection.md`](docs/bird-detection.md)）；
-  - Web 界面**还没有**接位置检测，只有 CLI（`whatbird detect`）与 Python API（`detect_birds()`）；
+  - Web 界面已接：`/api/detect`、`/api/detect-path` 与页面第 4 个卡片；CLI（`whatbird detect`）与
+    Python API（`detect_birds()`）同样可用；
   - 用的是 COCO 预训练权重，鸟只有**一个笼统的 "bird" 类别**（不区分种类）。常见场景够用，
     但**小型远距鸟、强烈遮挡、罕见姿态/侧面剪影会漏检**；鸟占画面比例很小时需要把 `--imgsz` 调大；
   - 纯检测，不做"这是不是同一只鸟"的跟踪或去重；
