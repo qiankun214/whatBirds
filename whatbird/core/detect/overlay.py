@@ -17,7 +17,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .models import Detection, DetectionReport
+from .models import BIRD_CLASS_ID, Detection, DetectionReport
 
 #: 鸟框颜色（橙红，在天空、绿叶、水面这些常见底色上都比较跳）
 COLOR_BOX = (255, 122, 24, 255)
@@ -141,7 +141,14 @@ def render_detection_overlay(
             _draw_label(draw, (box[0], y), text, COLOR_LABEL, style, width=width, height=height)
 
     if style.legend:
-        title = f"{report.count} BIRD(S) DETECTED" if report.birds else "NO BIRD DETECTED"
+        # 默认只有鸟算结果；--all-classes 下结果里可能混着非鸟目标，此时不要谎报成 "BIRD(S)"
+        bird_count = sum(1 for item in report.birds if item.class_id == BIRD_CLASS_ID)
+        if not report.birds:
+            title = "NO BIRD DETECTED"
+        elif bird_count == report.count:
+            title = f"{report.count} BIRD(S) DETECTED"
+        else:
+            title = f"{report.count} OBJECT(S) DETECTED  |  {bird_count} BIRD(S)"
         lines = [title]
         if report.device:
             lines.append(f"DEVICE {report.device.upper()}  |  {report.model_name or '-'}")

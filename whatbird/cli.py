@@ -538,12 +538,20 @@ def _render_detections(report: DetectionReport) -> str:
     if not report.birds:
         lines.append("  未检测到鸟")
     else:
-        lines.append(f"  检测到 {report.count} 只鸟（按置信度降序）")
-        for index, bird in enumerate(report.birds, start=1):
+        bird_count = sum(1 for item in report.birds if item.class_id == BIRD_CLASS_ID)
+        if bird_count == report.count:
+            lines.append(f"  检测到 {report.count} 只鸟（按置信度降序）")
+        else:
             lines.append(
-                f"  #{index}  框 x={bird.x} y={bird.y} w={bird.width} h={bird.height}"
-                f" ｜ 相对位置 {bird.x_ratio:.1%}/{bird.y_ratio:.1%}"
-                f" ｜ 置信度 {bird.confidence:.0%}"
+                f"  检测到 {report.count} 个目标（其中 {bird_count} 只鸟，按置信度降序）"
+            )
+        for index, item in enumerate(report.birds, start=1):
+            # 非鸟目标只在 --all-classes 下才会出现在结果里，标出类别名避免误读成鸟
+            label = "" if item.class_id == BIRD_CLASS_ID else f"  [{item.class_name or '?'}]"
+            lines.append(
+                f"  #{index}{label}  框 x={item.x} y={item.y} w={item.width} h={item.height}"
+                f" ｜ 相对位置 {item.x_ratio:.1%}/{item.y_ratio:.1%}"
+                f" ｜ 置信度 {item.confidence:.0%}"
             )
 
     if report.other_classes:
@@ -848,7 +856,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--all-classes",
         action="store_true",
         dest="all_classes",
-        help="不限制类别（默认只检测鸟；加了它仍只把鸟算进结果，其他类别会列出来）",
+        help=(
+            "把非鸟目标也算作结果（默认只把鸟算结果）。"
+            "非鸟类别无论如何都会列在「画面里还有」里，用这个开关可以连位置一起报出来"
+        ),
     )
     detect_parser.set_defaults(handler=cmd_detect)
 

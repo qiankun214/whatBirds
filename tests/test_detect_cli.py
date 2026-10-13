@@ -176,3 +176,16 @@ def test_detect_dependency_error_returns_code_2(jpeg_factory, monkeypatch, capsy
     err = capsys.readouterr().err
     assert "缺少依赖" in err
     assert "清华镜像" in err
+
+
+def test_detect_all_classes_lists_non_bird_objects_as_results(patched_detect, jpeg_factory, capsys):
+    """--all-classes 之后非鸟目标进结果表，且措辞不能谎报成「2 只鸟」。"""
+    path = jpeg_factory(name="mixed.jpg")
+    patched_detect([BIRD, DOG])
+
+    assert cli.main(["detect", str(path), "--all-classes"]) == 0
+
+    out = capsys.readouterr().out
+    assert "其中 1 只鸟" in out
+    assert "[dog]" in out
+    assert "#2" in out

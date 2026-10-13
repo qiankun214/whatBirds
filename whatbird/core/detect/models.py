@@ -14,10 +14,14 @@
 COCO 预训练模型里 ``bird`` 是独立类别（id 14），所以第一版**只报鸟**：
 ``DetectParams.classes`` 默认就是 ``(BIRD_CLASS_ID,)``。其余类别只记在
 :attr:`DetectionReport.other_classes` 里，用来解释「画面里明明有框，为什么没报出来」。
+
+这个过滤是**事后**做的（core 拿到全部类别的框之后再筛）：模型始终检测全部类别，
+否则非鸟框根本回不到上层，「为什么没报鸟」就无从解释。
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -47,6 +51,17 @@ DEVICES: tuple[str, ...] = (DEVICE_AUTO, DEVICE_XPU, DEVICE_CPU)
 
 #: 默认权重目录（用户目录下，与 API 配置同级的隔离区，天然不会被提交到 git）
 DEFAULT_MODEL_DIR = Path.home() / ".whatbird" / "models"
+
+#: 覆盖权重目录的环境变量（与 ``WHATBIRD_CONFIG_FILE`` 同一约定）。
+#: 需要它是因为 Web 界面没有 ``--model-dir`` 可传：受限环境（沙箱、只读用户目录、
+#: 权重放在项目内）下得有个办法让服务端找到已有权重，而不是去联网下载。
+MODEL_DIR_ENV = "WHATBIRD_MODEL_DIR"
+
+
+def default_model_dir() -> Path:
+    """权重目录：``WHATBIRD_MODEL_DIR`` 优先，否则 :data:`DEFAULT_MODEL_DIR`。"""
+    override = os.environ.get(MODEL_DIR_ENV, "").strip()
+    return Path(override).expanduser() if override else DEFAULT_MODEL_DIR
 
 
 def _clamp(value: float, limit: float) -> float:
@@ -194,7 +209,12 @@ class DetectParams:
     """NMS 的 IoU 阈值：重叠超过它的框会被合并，避免同一只鸟出好几个框。"""
 
     classes: tuple[int, ...] = COCO_BIRD_CLASSES
-    """只检测这些类别；空元组表示不限制（会返回画面里所有类别的框）。"""
+    """哪些类别算结果；空元组表示不过滤（非鸟目标也进结果，对应 CLI 的 ``--all-classes``）。
+
+    这是**事后过滤**（在 core 层做）：模型始终检测全部类别，因为非鸟框要用来解释
+    「画面里明明有目标，为什么没报鸟」。它也不会让推理变快 —— ultralytics 本来就是
+    先推理再按类别筛，``classes`` 只是过滤 NMS 之后的列表。
+    """
 
     max_det: int = DEFAULT_MAX_DET
     """单张图最多返回多少个框（防止密集画面下爆内存 / 刷屏）。"""
@@ -203,7 +223,7 @@ class DetectParams:
     """True 时跨类别做 NMS；只检测鸟的情况下两者等价，保留是为了行为可控。"""
 
     def resolved_model_dir(self) -> Path:
-        return Path(self.model_dir).expanduser() if self.model_dir else DEFAULT_MODEL_DIR
+        return Path(self.model_dir).expanduser() if self.model_dir else default_model_dir()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -240,8 +260,10 @@ class DetectionReport:
     width: int = 0
     height: int = 0
     birds: list[Detection] = field(default_factory=list)
+    """检测到的目标，按置信度降序。默认只含鸟；``classes`` 为空时才可能含非鸟目标。"""
+
     other_classes: list[str] = field(default_factory=list)
-    """本次画面里出现、但被 :attr:`DetectParams.classes` 过滤掉的类别名（按字母序去重）。"""
+    """本次画面里出现、但不算结果的类别名（按字母序去重），用来解释「为什么没报鸟」。"""
 
     device: str = ""
     """实际使用的推理设备（``xpu`` / ``cpu``）——回退时这里会如实上报，不假装用了显卡。"""
@@ -265,10 +287,18 @@ class DetectionReport:
         return self.birds[0] if self.birds else None
 
     def summary_line(self) -> str:
-        """一行摘要，CLI 控制台用。"""
+        """一行摘要，CLI 控制台用。
+
+        默认只有鸟算结果，所以平时就是「检测到 N 只鸟」；``--all-classes`` 下结果里
+        可能混着非鸟目标，此时如实说明其中几只是鸟，不要谎报成「N 只鸟」。
+        """
         if not self.birds:
             return "未检测到鸟"
-        head = f"检测到 {self.count} 只鸟"
+        bird_count = sum(1 for item in self.birds if item.class_id == BIRD_CLASS_ID)
+        if bird_count == self.count:
+            head = f"检测到 {self.count} 只鸟"
+        else:
+            head = f"检测到 {self.count} 个目标（其中 {bird_count} 只鸟）"
         best = self.top
         if best is not None:
             head += f"（最高置信度 {best.confidence:.0%}）"

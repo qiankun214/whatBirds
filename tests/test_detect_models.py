@@ -103,3 +103,14 @@ def test_report_empty_state():
     assert report.found is False
     assert report.top is None
     assert report.summary_line() == "未检测到鸟"
+
+
+def test_summary_line_does_not_call_non_bird_results_birds():
+    """--all-classes 下结果里可能混着非鸟目标，摘要必须如实说明其中几只是鸟。"""
+    report = DetectionReport(source_image="a.jpg", width=100, height=50)
+    report.birds = [
+        Detection(x=1, y=2, width=3, height=4, confidence=0.9),
+        Detection(x=5, y=6, width=7, height=8, confidence=0.8, class_id=16, class_name="dog"),
+    ]
+
+    assert report.summary_line().startswith("检测到 2 个目标（其中 1 只鸟）")

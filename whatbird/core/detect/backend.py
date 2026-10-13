@@ -27,6 +27,7 @@ from .models import (
     DEVICES,
     Detection,
     DetectParams,
+    MODEL_DIR_ENV,
     RawBox,
     build_detection,
     sort_by_confidence,
@@ -39,8 +40,9 @@ TORCH_XPU_INDEX = "https://download.pytorch.org/whl/xpu"
 
 INSTALL_HINT = (
     "请按顺序装检测依赖（见 requirements-detect.txt）：\n"
-    f"  1) python -m pip install -i {TORCH_XPU_INDEX} torch==2.8.0 torchvision==0.23.0\n"
-    f"  2) python -m pip install -i {PIP_MIRROR} --no-deps ultralytics\n"
+    f"  1) python -m pip install -i {PIP_MIRROR} torch==2.14.1 torchvision==0.29.1\n"
+    f"     （有 Intel 显卡时改从 {TORCH_XPU_INDEX} 装 XPU 版：torch torchvision）\n"
+    f"  2) python -m pip install -i {PIP_MIRROR} --no-deps ultralytics==8.4.177\n"
     "第 2 步必须加 --no-deps：ultralytics 声明的是 opencv-python（含 GUI），"
     "会顶掉本项目刻意选的 opencv-python-headless"
 )
@@ -85,7 +87,7 @@ def xpu_available() -> bool:
 def resolve_device(requested: str) -> str:
     """把 ``auto`` 解析成真实设备名。
 
-    - ``auto``：能用 Intel 显卡就用（本机是 Arc A770），否则退回 CPU；
+    - ``auto``：能用 Intel 显卡就用，否则退回 CPU（当前开发机没有 Intel 显卡）；
     - 显式指定 ``xpu`` 但不可用：直接报错，而不是悄悄退回 CPU 让人以为跑了显卡。
     """
     value = (requested or DEVICE_AUTO).strip().lower()
@@ -101,7 +103,7 @@ def resolve_device(requested: str) -> str:
             "指定了 xpu（Intel 显卡）推理，但当前环境检测不到可用的 XPU 设备",
             hint=(
                 '可能是 torch 装的是 CPU 版、驱动过旧，或显卡被独占；先跑 '
-                'python -c "import torch;print(torch.xpu.is_available())" 确认，'
+                'python -c "import torch;print(getattr(torch, \'xpu\', None) is not None and torch.xpu.is_available())" 确认，'
                 "或改用 --device cpu / --device auto"
             ),
         )
@@ -126,9 +128,29 @@ def resolve_model_path(params: DetectParams) -> str:
     return str(params.resolved_model_dir() / candidate.name)
 
 
-def resolve_classes(params: DetectParams) -> list[int] | None:
-    """ultralytics 的 ``classes`` 参数：``None`` 表示不限制类别。"""
-    return list(params.classes) if params.classes else None
+def ensure_model_dir(path: Path | str) -> None:
+    """确保权重的父目录存在；不可写时给出可操作的中文提示。
+
+    受限环境（沙箱、只读用户目录、CI）下这是最常见的失败点：默认权重目录
+    ``~/.whatbird/models`` 写不进去。直接让 ``OSError`` 冒出去的话，用户只看到裸栈，
+    Web 端还会变成 500 —— 所以统一换成 :class:`DetectorDependencyError`。
+    """
+    target = Path(path)
+    if target.exists():
+        return
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DetectorDependencyError(
+            f"权重目录不可写：{target.parent}",
+            hint=(
+                "换一个可写目录：CLI 用 --model-dir，服务端用环境变量 "
+                f"{MODEL_DIR_ENV}；也可以先在别处下好权重再放进去"
+                "（tools/fetch_yolo_weight.py --dest <目录>）"
+            ),
+        ) from exc
+
 
 # --------------------------------------------------------------------- 后端
 class YoloDetector:
@@ -159,8 +181,7 @@ class YoloDetector:
             ) from exc
 
         path = Path(self._model_path)
-        if not path.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_model_dir(path)
 
         try:
             model = YOLO(self._model_path)
@@ -182,13 +203,18 @@ class YoloDetector:
 
     # ------------------------------------------------------------- 推理
     def __call__(self, image: Any, params: DetectParams) -> tuple[list[RawBox], str]:
+        # 刻意**不**把 params.classes 下推给 ultralytics：模型层的类别过滤（classes=[14]）
+        # 会让非鸟框根本回不到上层，而「画面里明明有目标、为什么没报鸟」正是靠这些框解释的
+        # （曾经就是这样：默认参数下 report.other_classes 永远是空的，只有 --all-classes 才有内容）。
+        # 类别过滤一律放在 core 的 build_detections。这不会让推理变慢：ultralytics 本来
+        # 就是先推理再按类别筛，classes 只是过滤 NMS 之后的列表。
         results = self._model.predict(
             source=image,
             imgsz=params.imgsz,
             conf=params.conf,
             iou=params.iou,
             max_det=params.max_det,
-            classes=resolve_classes(params),
+            classes=None,
             agnostic_nms=params.agnostic_nms,
             device=self._device,
             verbose=False,
@@ -254,21 +280,25 @@ def build_detections(
     height: int,
     classes: Sequence[int] | None,
 ) -> tuple[list[Detection], list[str], list[str]]:
-    """按「只报鸟」的规则过滤并换算成对外的 :class:`Detection`。
+    """按 ``classes`` 过滤并换算成对外的 :class:`Detection`。
 
-    返回 ``(鸟的框列表, 被过滤掉的类别名, 相关提示)``。这条产品规则刻意放在 core 层
+    返回 ``(结果列表, 被过滤掉的类别名, 相关提示)``。这条产品规则刻意放在 core 层
     而不是后端：**没有显卡、没有权重**的环境也能把它完整测掉。
 
-    非鸟类别不会进入 ``birds``，只会进 ``other_classes`` 并附一句中文说明，
-    用来解释「画面里明明有目标，为什么结果里没有鸟」。
-    也就是说 ``classes`` 只影响「过滤掉哪些类别名要上报」，不影响「birds 只装鸟」这条规则。
+    - ``classes`` 为空（``--all-classes``）→ **不过滤**，所有类别都算结果；
+    - 默认 ``(BIRD_CLASS_ID,)`` → 只有鸟算结果；其他类别进 ``other_classes`` 并附一句
+      中文说明，用来解释「画面里明明有目标，为什么结果里没有鸟」。
+
+    注意类别过滤**不能**下推给模型（``predict(classes=[14])``）：那样非鸟框根本回不到这里，
+    上面那句解释就永远说不出来。见 :meth:`YoloDetector.__call__` 里的说明。
     """
-    birds: list[Detection] = []
+    results: list[Detection] = []
     filtered: dict[int, str] = {}
+    wanted = set(classes) if classes else None
 
     for raw in raw_boxes:
-        if raw.class_id == BIRD_CLASS_ID:
-            birds.append(build_detection(raw, width=width, height=height))
+        if wanted is None or raw.class_id in wanted:
+            results.append(build_detection(raw, width=width, height=height))
         else:
             filtered[raw.class_id] = raw.class_name
 
@@ -276,7 +306,7 @@ def build_detections(
     if filtered:
         pairs = "、".join(f"{name}(id {identifier})" for identifier, name in sorted(filtered.items()))
         notes.append(f"画面里还有非鸟目标（按参数过滤，不计入结果）：{pairs}")
-    return sort_by_confidence(birds), unique_class_names(list(filtered.values())), notes
+    return sort_by_confidence(results), unique_class_names(list(filtered.values())), notes
 
 
 # --------------------------------------------------------------------- 缓存
@@ -317,9 +347,9 @@ __all__ = [
     "YoloDetector",
     "build_detections",
     "clear_cache",
+    "ensure_model_dir",
     "get_detector",
     "raw_boxes_from_results",
-    "resolve_classes",
     "resolve_device",
     "resolve_model_path",
     "xpu_available",

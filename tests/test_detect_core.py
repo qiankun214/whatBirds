@@ -152,3 +152,17 @@ def test_cpu_fallback_is_explained_in_notes(jpeg_factory, monkeypatch):
 
     assert report.device == "cpu"
     assert any("Intel 显卡" in note for note in report.notes)
+
+
+def test_all_classes_keeps_non_bird_objects_as_results(jpeg_factory):
+    """``classes=()``（CLI 的 --all-classes）：非鸟目标也进结果，不再只当解释信息。"""
+    path = jpeg_factory(name="mixed.jpg", size=(100, 100))
+    dog = RawBox(0.5, 0.5, 0.9, 0.9, 0.99, 16, "dog")
+    detector = FakeDetector([BIRD, dog])
+
+    report = detect_birds(path, params=DetectParams(classes=()), detector=detector)
+
+    assert report.count == 2
+    assert {item.class_name for item in report.birds} == {"bird", "dog"}
+    assert report.other_classes == []
+    assert "其中 1 只鸟" in report.summary_line()
