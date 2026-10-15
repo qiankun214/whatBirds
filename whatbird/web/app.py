@@ -63,6 +63,7 @@ from ..core import (
 )
 from ..core.config import ArkConfig, mask_secret
 from ..core.detect.models import COCO_BIRD_CLASSES, DEFAULT_CONF, DEFAULT_IMGSZ, DetectParams
+from ..core.focus.region import sharpness_tag, try_score_regions
 from .jobs import BatchJobManager
 
 #: 上传大小上限：20 MB（远超模型需要，纯粹防误操作）
@@ -155,6 +156,10 @@ class DetectPathRequest(BaseModel):
     all_classes: bool = Field(
         default=False,
         description="把非鸟目标也算作结果；默认只把鸟算结果，非鸟类别只列在说明里",
+    )
+    sharpness: bool = Field(
+        default=False,
+        description="顺带给每只鸟评清晰度（同图内相对量：框内最锐处 vs 全图最锐处）",
     )
 
 
@@ -431,12 +436,17 @@ def create_app() -> FastAPI:
         conf: float,
         imgsz: int,
         all_classes: bool,
+        sharpness: bool = False,
     ) -> dict[str, Any]:
         """跑一次本地 YOLO 推理并附上画框标注图。
 
         与对焦点分析同样是纯本地、同步返回（不调用方舟、不消耗额度、不需要 API Key）。
         区别是**多了可选依赖**：没装 ultralytics / torch、或权重不在本地时，core 会抛
         :class:`DetectorDependencyError`，由统一异常处理器翻成带中文安装提示的 400。
+
+        ``sharpness=True`` 时顺带把每只鸟的框拿去评清晰度：**两个能力的拼装发生在这一层**
+        （core 的 detect 不依赖 focus，反之亦然）。纯色图这类"测不出清晰度"的情况不会让
+        整个请求失败，只在 ``sharpness.notes`` 里说明原因。
         """
         params = DetectParams(
             conf=conf,
@@ -444,8 +454,24 @@ def create_app() -> FastAPI:
             classes=() if all_classes else COCO_BIRD_CLASSES,
         )
         report = detect_birds(source, params=params)
+        payload = report.to_dict()
+
+        if sharpness and report.birds:
+            scored, reason = try_score_regions(source, report.birds)
+            if scored is not None:
+                for bird_payload, score in zip(payload["birds"], scored.regions):
+                    item = score.to_dict()
+                    item["tag"] = sharpness_tag(score)
+                    bird_payload["sharpness"] = item
+                payload["sharpness"] = {
+                    "frame": scored.to_dict()["frame"],
+                    "notes": list(scored.notes),
+                }
+            else:
+                payload["sharpness"] = {"frame": None, "notes": [reason]}
+
         overlay = render_bird_overlay(source, report)
-        return {"result": report.to_dict(), "overlay": overlay_data_url(overlay)}
+        return {"result": payload, "overlay": overlay_data_url(overlay)}
 
     @app.post("/api/detect", tags=["detect"], dependencies=[Depends(require_client_header)])
     def detect_upload(
@@ -453,6 +479,7 @@ def create_app() -> FastAPI:
         conf: float = Form(DEFAULT_CONF),
         imgsz: int = Form(DEFAULT_IMGSZ),
         all_classes: bool = Form(False),
+        sharpness: bool = Form(False),
     ) -> dict[str, Any]:
         """上传一张 jpg，返回每一只鸟的位置 + 原图上的画框标注。"""
         data = file.file.read()
@@ -466,6 +493,7 @@ def create_app() -> FastAPI:
             conf=conf,
             imgsz=imgsz,
             all_classes=all_classes,
+            sharpness=sharpness,
         )
 
     @app.post(
@@ -480,6 +508,7 @@ def create_app() -> FastAPI:
             conf=payload.conf,
             imgsz=payload.imgsz,
             all_classes=payload.all_classes,
+            sharpness=payload.sharpness,
         )
 
     # ----------------------------------------------------------- 静态前端

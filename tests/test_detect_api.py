@@ -13,7 +13,7 @@ import io
 
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from whatbird.core import DetectorDependencyError
 from whatbird.core.detect.models import (
@@ -34,6 +34,19 @@ client = TestClient(web_app.app)
 def _jpg_bytes(size=(480, 360)) -> bytes:
     buffer = io.BytesIO()
     Image.new("RGB", size, (90, 140, 100)).save(buffer, format="JPEG", quality=90)
+    return buffer.getvalue()
+
+
+def _textured_jpg_bytes(size=(480, 360)) -> bytes:
+    """带清晰纹理的 jpg —— 清晰度评分要求图里有细节（纯色图测不出来）。"""
+    image = Image.new("RGB", size, (90, 140, 100))
+    draw = ImageDraw.Draw(image)
+    for y in range(0, size[1], 8):
+        for x in range(0, size[0], 8):
+            if ((x // 8) + (y // 8)) % 2 == 0:
+                draw.rectangle([x, y, x + 7, y + 7], fill=(240, 240, 240))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=95)
     return buffer.getvalue()
 
 
@@ -269,3 +282,73 @@ def test_detect_reports_other_classes_from_core(patched_detect):
 
     assert response.status_code == 200
     assert response.json()["result"]["other_classes"] == ["bus", "person"]
+
+
+# ------------------------------------------------------------------ 清晰度（sharpness）
+def test_detect_with_sharpness_attaches_per_bird_scores(patched_detect):
+    """sharpness=true：每只鸟带上清晰度（同图内相对量），并附全图统计与说明。"""
+    patched_detect(size=(480, 360), birds=1)
+
+    response = client.post(
+        "/api/detect",
+        headers=HEADERS,
+        files={"file": ("sharp.jpg", _textured_jpg_bytes((480, 360)), "image/jpeg")},
+        data={"sharpness": "true"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+
+    score = result["birds"][0]["sharpness"]
+    assert 0.0 < score["relative_to_frame_peak"] <= 1.0
+    assert 0.0 <= score["percentile"] <= 1.0
+    assert score["tag"], "标注图/前端都要用这个 ASCII 短标签"
+    assert score["verdict"]
+
+    assert result["sharpness"]["frame"]["peak"] > 0
+    assert isinstance(result["sharpness"]["notes"], list)
+
+
+def test_detect_without_sharpness_has_no_scores(patched_detect):
+    patched_detect()
+
+    response = client.post(
+        "/api/detect",
+        headers=HEADERS,
+        files={"file": ("plain.jpg", _textured_jpg_bytes(), "image/jpeg")},
+    )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert "sharpness" not in result
+    assert "sharpness" not in result["birds"][0]
+
+
+def test_sharpness_on_featureless_image_still_succeeds(patched_detect):
+    """纯色图测不出清晰度，但**不能**连累整个检测请求失败。"""
+    patched_detect()
+
+    response = client.post(
+        "/api/detect",
+        headers=HEADERS,
+        files={"file": ("flat.jpg", _jpg_bytes(), "image/jpeg")},
+        data={"sharpness": "true"},
+    )
+
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["sharpness"]["frame"] is None
+    assert any("清晰度差异" in note for note in result["sharpness"]["notes"])
+    assert "sharpness" not in result["birds"][0]
+
+
+def test_detect_path_accepts_sharpness_flag(patched_detect, jpeg_factory):
+    patched_detect()
+    path = jpeg_factory(name="bypath-sharp.jpg")
+
+    response = client.post(
+        "/api/detect-path", headers=HEADERS, json={"path": str(path), "sharpness": True}
+    )
+
+    assert response.status_code == 200
+    assert "sharpness" in response.json()["result"]

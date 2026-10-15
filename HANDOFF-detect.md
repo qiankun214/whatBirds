@@ -17,6 +17,10 @@
 
 **纯本地**：不调用方舟、不消耗额度、不需要 API Key；只有首次需要一份 5.4 MB 的权重。
 
+**与对焦模块的拼装**：`detect --sharpness` / `/api/detect*` 的 `sharpness` 开关会把每个检测框
+拿去评清晰度（"框出的这只鸟锐不锐"），实现见 [`HANDOFF.md`](HANDOFF.md) §6.1 ——
+两个 core 模块**互不依赖**，拼装发生在 CLI / Web 层。
+
 **当前状态（已验收）**：
 
 | 项 | 状态 |
@@ -60,6 +64,7 @@
 | `tests/test_detect_api.py` | REST 契约：参数透传（`conf`/`imgsz`/`all_classes`）、缺权重的 400 + 提示、标注图可解码、CSRF 头、大小上限、严格字段 |
 | `tests/test_detect_samples.py` | 真实样张（无权重/无样张时整体 skip） |
 | `tests/test_frontend.py`（改） | 新增检测面板的 id / 类名 / `/api/detect*` 契约 |
+| `tests/test_focus_region.py` | 区域清晰度评分 20 条（合成样本；见 [`HANDOFF.md`](HANDOFF.md) §6.1） |
 
 ### 1.3 对外接口
 

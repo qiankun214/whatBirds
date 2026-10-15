@@ -370,6 +370,9 @@ code {
 
 .detect-detail h4 { margin: 14px 0 6px; font-size: 13.5px; }
 
+/* 清晰度列：后端给的 tag 是 ASCII 短结论（IN FOCUS / SOFT / NO DETAIL…），加粗好扫 */
+.detect-table .sharp-cell { font-weight: 600; white-space: nowrap; }
+
 @media (max-width: 820px) {
   .detect-grid { grid-template-columns: 1fr; }
 }

@@ -194,6 +194,15 @@ def test_css_styles_the_detect_panel():
         assert selector in CSS, selector
 
 
+def test_detect_panel_shows_sharpness_column():
+    """位置检测表里要有清晰度列，且前端明确请求 sharpness（后端默认不开）。"""
+    assert "清晰度" in HTML
+    assert '<th>清晰度</th>' in HTML
+    assert ".detect-table .sharp-cell" in CSS
+    assert re.search(r'form\.append\("sharpness",\s*"true"\)', JS)
+    assert re.search(r"sharpness:\s*true", JS)
+
+
 def test_batch_and_progress_ui_markup_exists():
     """批量识别所需的界面元素：多选、进度条、当前第几张、终止按钮、结果表。"""
     for marker in (

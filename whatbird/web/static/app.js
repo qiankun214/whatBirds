@@ -1099,6 +1099,14 @@
       appendCell(tr, "x=" + item.x + " y=" + item.y + " w=" + item.width + " h=" + item.height);
       appendCell(tr, percent(item.x_ratio) + " / " + percent(item.y_ratio));
       appendCell(tr, percent(item.confidence));
+
+      // 清晰度：同图内相对量（框内最锐处 vs 全图最锐处），后端已经算好 tag 与中文结论
+      var sharp = item.sharpness || null;
+      if (sharp) {
+        appendCell(tr, (sharp.tag || "-") + " " + percent(sharp.relative_to_frame_peak), "sharp-cell");
+      } else {
+        appendCell(tr, "—");
+      }
       rows.appendChild(tr);
     });
 
@@ -1118,7 +1126,7 @@
       ? "按参数过滤、不计入结果的目标类别：" + others.join("、")
       : "";
 
-    var notes = result.notes || [];
+    var notes = (result.notes || []).concat((result.sharpness && result.sharpness.notes) || []);
     $("detect-notes-wrap").hidden = notes.length === 0;
     renderList($("detect-notes"), notes, function (li, note) { li.textContent = note; });
 
@@ -1148,6 +1156,7 @@
     if (!files.length) { showDetectError("请先在上方选择至少一张 jpg 图片。"); return; }
     var form = new FormData();
     form.append("file", files[0]);
+    form.append("sharpness", "true");
     await runDetect("/api/detect", { method: "POST", body: form });
   }
 
@@ -1157,7 +1166,7 @@
     await runDetect("/api/detect-path", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: paths[0] })
+      body: JSON.stringify({ path: paths[0], sharpness: true })
     });
   }
 
