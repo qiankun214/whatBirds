@@ -30,7 +30,7 @@ from PIL import ImageOps
 
 from ..errors import ImageInputError, WhatBirdError
 from ..image_input import ImageSource, open_stored_image, read_image_bytes, to_rgb
-from .content import ContentAnalysis, analyze_content
+from .content import ContentAnalysis, SharpnessMap, analyze_content, build_sharpness_map
 from .exif_focus import read_af_point, to_hit, unavailable_reason
 from .models import (
     METHOD_CONTENT,
@@ -38,8 +38,19 @@ from .models import (
     FocusHit,
     FocusParams,
     FocusReport,
+    RegionBox,
+    RegionScoreReport,
+    RegionSharpness,
 )
-from .overlay import OverlayStyle, overlay_data_url, render_focus_overlay, render_overlay
+from .overlay import (
+    OverlayStyle,
+    overlay_data_url,
+    render_focus_overlay,
+    render_overlay,
+    render_overlay_regions,
+    render_region_overlay,
+)
+from .region import score_region_sharpness, score_regions, sharpness_tag, try_score_regions
 
 TAG_ORIENTATION = 0x0112
 
@@ -164,11 +175,22 @@ __all__ = [
     "FocusReport",
     "ImageInputError",
     "OverlayStyle",
+    "RegionBox",
+    "RegionScoreReport",
+    "RegionSharpness",
+    "SharpnessMap",
     "Source",
     "analyze_content",
     "analyze_focus",
+    "build_sharpness_map",
     "overlay_data_url",
     "read_af_point",
     "render_focus_overlay",
     "render_overlay",
+    "render_overlay_regions",
+    "render_region_overlay",
+    "score_region_sharpness",
+    "score_regions",
+    "sharpness_tag",
+    "try_score_regions",
 ]

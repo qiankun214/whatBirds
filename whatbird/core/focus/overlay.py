@@ -290,16 +290,148 @@ def render_focus_overlay(
     return encode_png(annotated)
 
 
+# ---------------------------------------------------------------- 区域清晰度标注
 def overlay_data_url(payload: bytes, *, mime: str = "image/png") -> str:
     """把标注图字节编码成 data URL，供网页直接 ``<img src>`` 使用。"""
     return f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
 
 
+#: 区域结论的颜色：合焦（绿）/ 接近（黄）/ 偏软（橙）/ 测不出来（灰）
+COLOR_REGION_SHARP = (0, 200, 120, 255)
+COLOR_REGION_NEAR = (255, 200, 0, 255)
+COLOR_REGION_SOFT = (255, 122, 24, 255)
+COLOR_REGION_UNKNOWN = (170, 170, 170, 255)
+
+
+def region_color(tag: str) -> tuple[int, int, int, int]:
+    """把 :func:`~whatbird.core.focus.region.sharpness_tag` 的标签映射成颜色。"""
+    if tag == "IN FOCUS":
+        return COLOR_REGION_SHARP
+    if tag == "NEAR FOCUS":
+        return COLOR_REGION_NEAR
+    if tag in ("SOFT", "SOFT EDGE"):
+        return COLOR_REGION_SOFT
+    return COLOR_REGION_UNKNOWN
+
+
+def render_overlay_regions(
+    image: Image.Image,
+    report: Any,
+    *,
+    style: OverlayStyle | None = None,
+    coordinate_scale: float = 1.0,
+) -> Image.Image:
+    """在图上给每块被评分的区域画一个框 + 结论标签，返回新的 RGB 图像。
+
+    与对焦标注图同样的两条纪律：**先描黑边再画彩线**（照片底色不可控），
+    以及**文字只用 ASCII**（中文结论放在 CLI/网页文本里）。
+    """
+    from .region import sharpness_tag
+
+    style = style or OverlayStyle()
+    base = image.convert("RGBA")
+    width, height = base.size
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+
+    ratio = max(float(coordinate_scale), 1e-6)
+    font = _font(style.font_size)
+
+    def sx(value: float) -> int:
+        return _clamp(round(value * ratio), width)
+
+    def sy(value: float) -> int:
+        return _clamp(round(value * ratio), height)
+
+    counted: dict[str, int] = {}
+    for index, item in enumerate(report.regions, start=1):
+        box = (
+            sx(item.box.x),
+            sy(item.box.y),
+            sx(item.box.x + item.box.width),
+            sy(item.box.y + item.box.height),
+        )
+        if box[2] <= box[0] or box[3] <= box[1]:
+            continue
+
+        tag = sharpness_tag(item)
+        counted[tag] = counted.get(tag, 0) + 1
+        color = region_color(tag)
+
+        draw.rectangle(box, outline=COLOR_EDGE, width=style.line + style.edge * 2)
+        draw.rectangle(box, outline=color, width=style.line)
+
+        if style.draw_labels:
+            label = f"{tag} {item.relative_to_frame_peak:.0%}"
+            if len(report.regions) > 1:
+                label = f"#{index} {label}"
+            y = box[1] - style.font_size - 12
+            if y < 0:
+                y = box[1] + 6
+            _label(draw, (box[0], y), label, color, style, width=width, height=height)
+
+    if style.legend:
+        lines: list[tuple[str, tuple[int, int, int, int]]] = [
+            ("REGION SHARPNESS  (vs frame peak)", COLOR_TEXT),
+            (f"FRAME PEAK/MEDIAN {report.frame_contrast:.2f}", COLOR_TEXT),
+        ]
+        for tag in ("IN FOCUS", "NEAR FOCUS", "SOFT EDGE", "SOFT", "NO DETAIL", "TOO SMALL", "NO PEAK"):
+            if counted.get(tag):
+                lines.append((f"{counted[tag]} x {tag}", region_color(tag)))
+
+        pad = 8
+        text_w = max(draw.textbbox((0, 0), text, font=font)[2] for text, _ in lines)
+        text_h = draw.textbbox((0, 0), "Ag", font=font)[3]
+        panel_w = text_w + pad * 3
+        panel_h = len(lines) * (text_h + 6) + pad * 2
+        draw.rectangle([pad, pad, pad + panel_w, pad + panel_h], fill=COLOR_PANEL)
+        for row, (text, color) in enumerate(lines):
+            y = pad * 2 + row * (text_h + 6) - 3
+            draw.rectangle([pad * 2, y + text_h // 2 - 4, pad * 2 + 12, y + text_h // 2 + 4], fill=color)
+            draw.text((pad * 2 + 20, y), text, font=font, fill=COLOR_TEXT)
+
+    return Image.alpha_composite(base, layer).convert("RGB")
+
+
+def render_region_overlay(
+    source: Any,
+    report: Any,
+    *,
+    style: OverlayStyle | None = None,
+    max_side: int = DEFAULT_OVERLAY_MAX_SIDE,
+) -> bytes:
+    """读图 → 转正 → 给每块区域画框 → 编码成 PNG 字节（``max_side`` 同对焦标注图）。"""
+    from ..image_input import encode_png, load_upright_rgb
+
+    _, image = load_upright_rgb(source)
+
+    coordinate_scale = 1.0
+    if max_side and max(image.size) > max_side:
+        coordinate_scale = max_side / float(max(image.size))
+        image = image.resize(
+            (
+                max(1, int(round(image.width * coordinate_scale))),
+                max(1, int(round(image.height * coordinate_scale))),
+            ),
+            Image.LANCZOS,
+        )
+
+    annotated = render_overlay_regions(image, report, style=style, coordinate_scale=coordinate_scale)
+    return encode_png(annotated)
+
+
 __all__ = [
     "COLOR_CONTENT",
     "COLOR_EXIF",
+    "COLOR_REGION_NEAR",
+    "COLOR_REGION_SHARP",
+    "COLOR_REGION_SOFT",
+    "COLOR_REGION_UNKNOWN",
     "OverlayStyle",
     "overlay_data_url",
+    "region_color",
     "render_focus_overlay",
     "render_overlay",
+    "render_overlay_regions",
+    "render_region_overlay",
 ]

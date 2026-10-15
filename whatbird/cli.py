@@ -44,8 +44,13 @@ from .core import (
     migrate_config,
     render_bird_overlay,
     render_focus_overlay,
+    render_region_overlay,
     save_config,
+    score_regions,
+    sharpness_tag,
+    try_score_regions,
 )
+from .core.image_input import load_upright_rgb
 from .core.config import (
     CONFIG_DIR_ENV,
     CONSENT_ENV,
@@ -54,6 +59,7 @@ from .core.config import (
     write_failure_hint,
 )
 from .core.detect.models import BIRD_CLASS_ID, DEFAULT_MODEL as DEFAULT_DETECT_MODEL, DetectionReport
+from .core.focus.models import RegionBox, RegionScoreReport, RegionSharpness
 from .core.prompt import MODE_FAST, MODE_FULL
 from .core.recognizer import BirdRecognizer
 
@@ -527,7 +533,10 @@ def _detect_overlay_path_for(args: argparse.Namespace, image: str, index: int) -
     return None
 
 
-def _render_detections(report: DetectionReport) -> str:
+def _render_detections(
+    report: DetectionReport,
+    scores: Sequence[RegionSharpness] | None = None,
+) -> str:
     rule = "─" * 60
     lines = [rule]
     lines.append(f"  鸟类位置检测  {report.source_image or '-'}")
@@ -553,6 +562,13 @@ def _render_detections(report: DetectionReport) -> str:
                 f" ｜ 相对位置 {item.x_ratio:.1%}/{item.y_ratio:.1%}"
                 f" ｜ 置信度 {item.confidence:.0%}"
             )
+            if scores and index - 1 < len(scores):
+                score = scores[index - 1]
+                lines.append(
+                    f"      清晰度 {sharpness_tag(score)}"
+                    f" ｜ 框内最锐处 = 全图峰值的 {score.relative_to_frame_peak:.0%}"
+                    f" ｜ 全图第 {score.percentile:.0%} 百分位"
+                )
 
     if report.other_classes:
         lines.append("")
@@ -586,9 +602,20 @@ def cmd_detect(args: argparse.Namespace) -> int:
         overlay_dir.mkdir(parents=True, exist_ok=True)
 
     reports: list[DetectionReport] = []
+    scores_by_image: list[list[RegionSharpness]] = []
     for index, image in enumerate(args.images, start=1):
         report = detect_birds(image, params=params)
         reports.append(report)
+
+        # --sharpness：把框出来的鸟逐块评清晰度（"选出的部分"最常见的来源）
+        scores: list[RegionSharpness] = []
+        if getattr(args, "sharpness", False) and report.birds:
+            scored, reason = try_score_regions(image, report.birds)
+            if scored is not None:
+                scores = scored.regions
+            else:
+                print(f"  （这张图无法评清晰度：{reason}）", file=sys.stderr)
+        scores_by_image.append(scores)
 
         target = _detect_overlay_path_for(args, image, index)
         if target is not None:
@@ -597,9 +624,209 @@ def cmd_detect(args: argparse.Namespace) -> int:
 
         if not args.json:
             if len(args.images) > 1:
-                print(f"[{index}/{len(args.images)}] {report.summary_line()}  | {report.source_image}")
+                tail = f" ｜ {_region_summary_for(scores)}" if scores else ""
+                print(
+                    f"[{index}/{len(args.images)}] {report.summary_line()}"
+                    f"  | {report.source_image}{tail}"
+                )
             else:
-                print(_render_detections(report))
+                print(_render_detections(report, scores))
+            if target is not None:
+                print(f"标注图已保存：{target}")
+
+    if args.json:
+        payload: Any
+        if len(reports) == 1:
+            payload = reports[0].to_dict()
+            _attach_sharpness(payload, scores_by_image[0])
+        else:
+            payload = {"total": len(reports), "items": [item.to_dict() for item in reports]}
+            for item_payload, scores in zip(payload["items"], scores_by_image):
+                _attach_sharpness(item_payload, scores)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _attach_sharpness(payload: dict[str, Any], scores: Sequence[RegionSharpness]) -> None:
+    """把每只鸟的清晰度评分挂到 JSON 的 birds 里（--sharpness 才做）。
+
+    这是**展示层**的补充：``DetectionReport.to_dict()`` 本身不含清晰度，
+    检测模块不依赖对焦模块，两个能力的拼装发生在 CLI / Web 这一层。
+    """
+    if not scores:
+        return
+    for bird_payload, score in zip(payload.get("birds", []), scores):
+        bird_payload["sharpness"] = score.to_dict()
+
+
+def _region_summary_for(scores: Sequence[RegionSharpness]) -> str:
+    counts: dict[str, int] = {}
+    for item in scores:
+        tag = sharpness_tag(item)
+        counts[tag] = counts.get(tag, 0) + 1
+    return "清晰度 " + "、".join(f"{name}×{count}" for name, count in counts.items())
+
+
+# --------------------------------------------------------------------- 区域清晰度
+def _region_params(args: argparse.Namespace) -> FocusParams:
+    return FocusParams(
+        max_side=args.max_side,
+        metric=args.metric,
+        region_quantile=args.quantile,
+    )
+
+
+def _parse_number_list(text: str, *, what: str) -> list[float]:
+    parts = [item.strip() for item in text.replace("，", ",").split(",")]
+    if len(parts) != 4:
+        raise ValueError(f"{what} 需要 4 个数（x,y,width,height），收到 {text!r}")
+    try:
+        return [float(item) for item in parts]
+    except ValueError as exc:
+        raise ValueError(f"{what} 必须是数字，收到 {text!r}") from exc
+
+
+def _pixel_box(text: str) -> RegionBox:
+    x, y, width, height = _parse_number_list(text, what="--box 的四个数")
+    return RegionBox(
+        x=int(round(x)),
+        y=int(round(y)),
+        width=max(int(round(width)), 1),
+        height=max(int(round(height)), 1),
+    )
+
+
+def _ratio_box(text: str, *, image_width: int, image_height: int) -> RegionBox:
+    x, y, width, height = _parse_number_list(text, what="--box-ratio 的四个数")
+    return RegionBox.from_ratios(
+        x, y, width, height, image_width=image_width, image_height=image_height
+    )
+
+
+def _region_overlay_path_for(args: argparse.Namespace, image: str, index: int) -> Path | None:
+    """决定这张图的区域标注图存哪（与 focus / detect 的规则一致）。"""
+    if args.overlay and len(args.images) == 1:
+        return Path(args.overlay).expanduser()
+    if args.overlay_dir:
+        stem = Path(image).stem or f"image{index}"
+        return Path(args.overlay_dir).expanduser() / f"{stem}.sharpness.png"
+    return None
+
+
+def _region_summary(report: RegionScoreReport) -> str:
+    """多张图时的一行摘要：几块区域、各自什么结论。"""
+    counts: dict[str, int] = {}
+    for item in report.regions:
+        tag = sharpness_tag(item)
+        counts[tag] = counts.get(tag, 0) + 1
+    joined = "、".join(f"{name}×{count}" for name, count in counts.items())
+    return f"{len(report.regions)} 块 ｜ {joined}"
+
+
+def _render_region_scores(report: RegionScoreReport) -> str:
+    rule = "─" * 60
+    lines = [rule]
+    lines.append(f"  区域清晰度评分  {report.source_image or '-'}")
+    lines.append(
+        f"  图像 {report.width}×{report.height}"
+        f"（分析尺度 {report.analyzed_width}×{report.analyzed_height}，聚合窗口 {report.window}px）"
+    )
+    lines.append(
+        f"  全图峰值/中位数 {report.frame_contrast:.2f}"
+        f"（{'有明确的唯一锐处' if report.frame_has_peak else '没有明显的唯一锐处'}）"
+    )
+    lines.append(rule)
+
+    for index, item in enumerate(report.regions, start=1):
+        lines.append(
+            f"  #{index}  框 x {item.box.x} y {item.box.y} {item.box.width}×{item.box.height}"
+            f"  相对位置 {item.x_ratio:.1%}/{item.y_ratio:.1%}"
+        )
+        lines.append(
+            f"      最锐处 = 全图峰值的 {item.relative_to_frame_peak:.0%}"
+            f" ｜ 全图最锐的 1% 有 {item.top_share:.0%} 在框内"
+            f" ｜ 该框落在全图第 {item.percentile:.0%} 百分位"
+        )
+        lines.append(
+            f"      纹理 σ {item.texture:.1f} ｜ 聚合窗口 {item.window}px"
+            f" ｜ 分析尺度采样 {item.sampled_pixels} 像素"
+        )
+        lines.append(f"      → {item.verdict}")
+
+    if report.notes:
+        lines.append("")
+        for note in report.notes:
+            lines.append(f"  提示：{note}")
+
+    lines.append("")
+    lines.append(f"  耗时 {report.elapsed_seconds:.2f}s ｜ 参数 {report.metric}")
+    return "\n".join(lines)
+
+
+def cmd_sharpness(args: argparse.Namespace) -> int:
+    """评选定区域的清晰度：这块区域相对"全图最锐处"有多锐。
+
+    这是**同一张图内部的相对量**（跨照片比较需要基准标定，本工具不做）。
+    典型用法：把 ``whatbird detect`` 框出来的鸟逐个评一遍（见 ``detect --sharpness``），
+    或者手动给一个框，回答"这块是不是合焦的那块"。
+    """
+    if args.overlay and args.overlay_dir:
+        print("[错误] --overlay 与 --overlay-dir 只能给一个", file=sys.stderr)
+        return 2
+    if args.overlay and len(args.images) > 1:
+        print(
+            "[错误] 一次给多张图时请用 --overlay-dir（多张图不能写进同一个文件）",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.box and not args.box_ratio:
+        print(
+            "[错误] 请至少指定一块区域：--box x,y,width,height（像素）"
+            " 或 --box-ratio rx,ry,rw,rh（0~1 相对坐标）；两者都可以重复给",
+            file=sys.stderr,
+        )
+        return 2
+
+    params = _region_params(args)
+    try:
+        pixel_boxes = [_pixel_box(item) for item in (args.box or [])]
+    except ValueError as exc:
+        print(f"[错误] {exc}", file=sys.stderr)
+        return 2
+
+    overlay_dir = Path(args.overlay_dir).expanduser() if args.overlay_dir else None
+    if overlay_dir is not None:
+        overlay_dir.mkdir(parents=True, exist_ok=True)
+
+    reports: list[RegionScoreReport] = []
+    for index, image in enumerate(args.images, start=1):
+        boxes = list(pixel_boxes)
+        if args.box_ratio:
+            # 相对坐标得先知道图片尺寸 —— 只在用 --box-ratio 时多解码一次
+            _, loaded = load_upright_rgb(image)
+            try:
+                boxes.extend(
+                    _ratio_box(item, image_width=loaded.width, image_height=loaded.height)
+                    for item in args.box_ratio
+                )
+            except ValueError as exc:
+                print(f"[错误] {exc}", file=sys.stderr)
+                return 2
+
+        report = score_regions(image, boxes, params=params)
+        reports.append(report)
+
+        target = _region_overlay_path_for(args, image, index)
+        if target is not None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(render_region_overlay(image, report))
+
+        if not args.json:
+            if len(args.images) > 1:
+                name = Path(image).name
+                print(f"[{index}/{len(args.images)}] {name}：{_region_summary(report)}")
+            else:
+                print(_render_region_scores(report))
             if target is not None:
                 print(f"标注图已保存：{target}")
 
@@ -809,6 +1036,64 @@ def build_parser() -> argparse.ArgumentParser:
     )
     focus_parser.set_defaults(handler=cmd_focus)
 
+    # sharpness
+    sharpness_parser = subparsers.add_parser(
+        "sharpness",
+        help="评选定区域的清晰度：这块区域相对「全图最锐处」有多锐",
+        description=(
+            "给一块（或多块）矩形区域评清晰度，回答「这块是不是合焦的那块」。\n"
+            "典型用法：先用 whatbird detect 找出鸟的框，再把框喂进来\n"
+            "（或者直接用 detect --sharpness 一步到位）。\n\n"
+            "注意：报出来的都是**同一张图内部**的相对量（相对全图最锐处、全图百分位）。\n"
+            "跨照片、跨内容比绝对锐度都不可靠，需要基准标定 —— 本工具刻意不做。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sharpness_parser.add_argument("images", nargs="+", help="jpg / jpeg 文件路径")
+    sharpness_parser.add_argument("--json", action="store_true", help="以 JSON 输出（便于脚本处理）")
+    sharpness_parser.add_argument(
+        "--box",
+        action="append",
+        metavar="x,y,w,h",
+        help="要评估的区域（像素坐标，w/h 是宽高、不是右下角）；可重复给多块",
+    )
+    sharpness_parser.add_argument(
+        "--box-ratio",
+        action="append",
+        dest="box_ratio",
+        metavar="rx,ry,rw,rh",
+        help="同上，但用 0~1 的相对坐标（前端在缩略图上框选时用）；可重复给多块",
+    )
+    sharpness_parser.add_argument(
+        "--overlay",
+        help="把区域与结论画到该路径（仅单张图；PNG）",
+    )
+    sharpness_parser.add_argument(
+        "--overlay-dir",
+        dest="overlay_dir",
+        help="多张图时把标注图按 <原名>.sharpness.png 存进该目录",
+    )
+    sharpness_parser.add_argument(
+        "--metric",
+        choices=("sml", "tenengrad"),
+        default="sml",
+        help="清晰度评价函数：sml = 改进拉普拉斯（默认），tenengrad = 梯度平方和",
+    )
+    sharpness_parser.add_argument(
+        "--max-side",
+        type=int,
+        dest="max_side",
+        default=1024,
+        help="分析时把图片最长边缩到该值（默认 1024）",
+    )
+    sharpness_parser.add_argument(
+        "--quantile",
+        type=float,
+        default=0.75,
+        help="框内锐度取哪个分位数当「这块普遍有多锐」（默认 0.75）",
+    )
+    sharpness_parser.set_defaults(handler=cmd_sharpness)
+
     # detect
     detect_parser = subparsers.add_parser(
         "detect",
@@ -860,6 +1145,11 @@ def build_parser() -> argparse.ArgumentParser:
             "把非鸟目标也算作结果（默认只把鸟算结果）。"
             "非鸟类别无论如何都会列在「画面里还有」里，用这个开关可以连位置一起报出来"
         ),
+    )
+    detect_parser.add_argument(
+        "--sharpness",
+        action="store_true",
+        help="顺带给每只鸟评清晰度（同图内相对量：框内最锐处 vs 全图最锐处）",
     )
     detect_parser.set_defaults(handler=cmd_detect)
 

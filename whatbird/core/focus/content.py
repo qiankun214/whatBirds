@@ -55,8 +55,8 @@ _MIN_REGION_RATIO = 0.0005
 _LIBS: tuple[Any, Any] | None = None
 
 
-def _libs() -> tuple[Any, Any]:
-    """惰性导入 opencv 与 numpy。
+def image_libs() -> tuple[Any, Any]:
+    """惰性导入 opencv 与 numpy（对焦分析相关的几个模块共用这一处）。
 
     刻意放在函数里而不是模块顶层：``import whatbird.core`` 会被 CLI 的每个子命令
     （包括 ``config show``）触发，不该为了一个功能付 opencv 的导入开销。
@@ -96,7 +96,7 @@ class ContentAnalysis:
 
 
 # --------------------------------------------------------------------- 工具
-def _odd(value: int, *, minimum: int = 3, maximum: int | None = None) -> int:
+def odd_kernel(value: int, *, minimum: int = 3, maximum: int | None = None) -> int:
     """夹到 ``[minimum, maximum]`` 内并保证是奇数（OpenCV 卷积核习惯用奇数）。"""
     number = max(int(value), int(minimum))
     if maximum is not None:
@@ -154,14 +154,59 @@ def _clamp(value: int, original: int) -> int:
     return int(min(max(value, 0), max(original - 1, 0)))
 
 
-# --------------------------------------------------------------------- 主流程
-def analyze_content(rgb: Any, *, params: FocusParams | None = None) -> ContentAnalysis:
-    """对一幅图像做内容分析。
+# --------------------------------------------------------------------- 清晰度图
+@dataclass(slots=True)
+class SharpnessMap:
+    """一次「清晰度图」构建的结果 —— 对焦分析与区域评分**共用同一条管线**。
+
+    共用是必须的：如果"全图最锐处在哪"与"框里这块锐不锐"出自两套口径，
+    那么两者比出来的相对值、百分位就都不可信（缩放、去噪、聚合窗口任何一处不同都会变）。
+
+    ``sharpness`` 为 ``None`` 表示这张图没法分析，原因在 :attr:`reason`。
+    """
+
+    gray: Any = None
+    """去噪后的灰度图（分析尺度，``float32``，0~255）。区域评分用它判断"框里有没有细节"。"""
+
+    sharpness: Any = None
+    """窗口求和后的清晰度图（分析尺度）。**绝对量**，不做比值归一化（见模块开头）。"""
+
+    window: int = 3
+    """聚合窗口边长（分析尺度像素）。区域评分要靠它判断框是不是小得不可信。"""
+
+    scale: float = 1.0
+    """分析尺度 ÷ 原图尺度。"""
+
+    analyzed_width: int = 0
+    analyzed_height: int = 0
+    source_width: int = 0
+    """原图尺寸 —— 对外坐标、比例字段都按它算。"""
+    source_height: int = 0
+
+    metric_label: str = ""
+    peak: float = 0.0
+    median: float = 0.0
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.sharpness is not None
+
+
+def build_sharpness_map(
+    rgb: Any,
+    *,
+    params: FocusParams | None = None,
+    window: int | None = None,
+) -> SharpnessMap:
+    """灰度 → 缩放 → 去噪 → 清晰度图（三步只在这里实现一次）。
 
     :param rgb: ``uint8`` 的 ``(H, W, 3)`` numpy 数组，或已按 EXIF 转正的 PIL 图像。
-    :returns: :class:`ContentAnalysis`，坐标**已换算回原图**。
+    :param window: 覆盖聚合窗口边长（默认按 ``aggregate_ratio`` 从短边算）。
+        区域评分用它给"小框"配一个更小的窗口 —— 窗口必须**远小于**被测区域，
+        否则框外相邻的锐利内容会把分数抬起来（见 :mod:`~whatbird.core.focus.region`）。
     """
-    cv2, np = _libs()
+    cv2, np = image_libs()
     params = params or FocusParams()
 
     if hasattr(rgb, "mode"):  # PIL.Image
@@ -169,14 +214,12 @@ def analyze_content(rgb: Any, *, params: FocusParams | None = None) -> ContentAn
 
     height, width = int(rgb.shape[0]), int(rgb.shape[1])
     if min(height, width) < MIN_SIDE:
-        return ContentAnalysis(
-            hit=FocusHit(
-                method=METHOD_CONTENT,
-                found=False,
-                detail=f"图片太小（{width}×{height}），无法做清晰度分析",
-            ),
+        return SharpnessMap(
+            source_width=width,
+            source_height=height,
             analyzed_width=width,
             analyzed_height=height,
+            reason=f"图片太小（{width}×{height}），无法做清晰度分析",
         )
 
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
@@ -201,11 +244,15 @@ def analyze_content(rgb: Any, *, params: FocusParams | None = None) -> ContentAn
         grayf = cv2.GaussianBlur(grayf, (0, 0), sigma)
 
     short_side = min(analyzed_height, analyzed_width)
-    window = _odd(
-        round(short_side * params.aggregate_ratio),
-        minimum=3,
-        maximum=_odd(max(short_side // 2, 3), minimum=3),
-    )
+    if window is None:
+        window = odd_kernel(
+            round(short_side * params.aggregate_ratio),
+            minimum=3,
+            maximum=odd_kernel(max(short_side // 2, 3), minimum=3),
+        )
+    else:
+        # 显式覆盖时只保证是合法的奇数窗口，不再按短边夹（调用方负责给合理值）
+        window = odd_kernel(int(window), minimum=3, maximum=odd_kernel(max(short_side // 2, 3), minimum=3))
 
     # ---- 3. 清晰度图（局部求和，绝对量；不做比值归一化） ----
     if params.metric == METRIC_TENENGRAD:
@@ -222,16 +269,58 @@ def analyze_content(rgb: Any, *, params: FocusParams | None = None) -> ContentAn
     peak = float(sharpness.max())
     baseline = float(np.median(sharpness))
     if not np.isfinite(peak) or peak <= 0:
-        return ContentAnalysis(
-            hit=FocusHit(
-                method=METHOD_CONTENT,
-                found=False,
-                detail="画面没有可用的清晰度差异（可能是纯色或完全均匀的图）",
-            ),
+        return SharpnessMap(
+            gray=grayf,
+            window=window,
+            scale=scale,
             analyzed_width=analyzed_width,
             analyzed_height=analyzed_height,
-            scale=scale,
+            source_width=width,
+            source_height=height,
+            reason="画面没有可用的清晰度差异（可能是纯色或完全均匀的图）",
         )
+
+    return SharpnessMap(
+        gray=grayf,
+        sharpness=sharpness,
+        window=window,
+        scale=scale,
+        analyzed_width=analyzed_width,
+        analyzed_height=analyzed_height,
+        source_width=width,
+        source_height=height,
+        metric_label=metric_label,
+        peak=peak,
+        median=baseline,
+    )
+
+
+# --------------------------------------------------------------------- 主流程
+def analyze_content(rgb: Any, *, params: FocusParams | None = None) -> ContentAnalysis:
+    """对一幅图像做内容分析。
+
+    :param rgb: ``uint8`` 的 ``(H, W, 3)`` numpy 数组，或已按 EXIF 转正的 PIL 图像。
+    :returns: :class:`ContentAnalysis`，坐标**已换算回原图**。
+    """
+    cv2, np = image_libs()
+    params = params or FocusParams()
+
+    smap = build_sharpness_map(rgb, params=params)
+    if not smap.ok:
+        return ContentAnalysis(
+            hit=FocusHit(method=METHOD_CONTENT, found=False, detail=smap.reason),
+            analyzed_width=smap.analyzed_width,
+            analyzed_height=smap.analyzed_height,
+            scale=smap.scale,
+        )
+
+    sharpness = smap.sharpness
+    window = smap.window
+    scale = smap.scale
+    analyzed_width, analyzed_height = smap.analyzed_width, smap.analyzed_height
+    width, height = smap.source_width, smap.source_height
+    peak, baseline = smap.peak, smap.median
+    metric_label = smap.metric_label
 
     eps = max(peak, 1.0) * 1e-6
     flat_index = int(np.argmax(sharpness))

@@ -382,6 +382,48 @@ python -m whatbird.cli focus D:\photos\*.jpg --overlay-dir D:\out
 
 ---
 
+## 4.1.1 区域清晰度评分（"选中的这一块有多锐"）
+
+给一块矩形区域评清晰度，回答**"这块是不是合焦的那块"**。典型来源是 `whatbird detect`
+框出来的鸟，也可以是手动框选的一块：
+
+```bash
+python -m whatbird.cli sharpness D:\photos\bird.jpg --box 120,80,300,240
+python -m whatbird.cli sharpness D:\photos\bird.jpg --box-ratio 0.2,0.1,0.3,0.4   # 0~1 相对坐标
+python -m whatbird.cli sharpness D:\photos\bird.jpg --box 120,80,300,240 --overlay out.png
+python -m whatbird.cli detect D:\photos\bird.jpg --sharpness                     # 检测 + 逐只评分
+```
+
+输出示例：
+
+```
+  区域清晰度评分  D:\photos\bird.jpg
+  图像 1200×801（分析尺度 1024×684，聚合窗口 55px）
+  全图峰值/中位数 51.99（有明确的唯一锐处）
+  #1  框 x 571 y 156 437×513  相对位置 47.6%/19.5%
+      最锐处 = 全图峰值的 100% ｜ 全图最锐的 1% 有 96% 在框内 ｜ 该框落在全图第 93% 百分位
+      纹理 σ 35.9 ｜ 聚合窗口 55px ｜ 分析尺度采样 163374 像素
+      → 合焦：画面里最锐的地方就在这个框里（框内最锐处 = 全图峰值的 100%，…）
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--box x,y,w,h` | 要评估的区域，**像素**坐标（w/h 是宽高、不是右下角）；可重复给多块 |
+| `--box-ratio rx,ry,rw,rh` | 同上，但用 0~1 相对坐标（前端在缩略图上框选时用） |
+| `--overlay` / `--overlay-dir` | 把区域与结论画到图上（`<原名>.sharpness.png`） |
+| `--quantile 0.75` | 框内锐度取哪个分位数当代表（默认 p75） |
+
+> ⚠ **只能给同一张图内部的相对结论**：跨内容比绝对锐度实测差 3 倍（棋盘格 vs 噪声），
+> 跨照片比需要基准标定 —— 本工具都不做。所以报的是"相对全图最锐处"与"全图百分位"，
+> 而不是一个"清晰度分数"。
+>
+> 另外两种"测不出来"的情况会被明确区分出来，而不是硬报一个分数：
+> **框内没有可测细节**（天空、纯化背景、纯色面 → "无法判断"）与
+> **整张图都没有唯一锐处**（全图峰值/中位数太小 → 只能说百分位）。
+> 原理、实测数据与已知边界见 [`docs/focus-algorithm.md`](docs/focus-algorithm.md) §三。
+
+---
+
 ## 4.2 鸟类位置检测（CLI -> core）
 
 找出画面里**每一只鸟的位置**（框 + 置信度）。用本地 YOLO 权重推理：**不调用方舟、不消耗额度、
@@ -425,6 +467,7 @@ python -m whatbird.cli detect D:\photos\bird.jpg --device cpu --conf 0.15 --imgs
 | `--imgsz 640` | 推理分辨率，调到 960 / 1280 更容易抓到远处小鸟（更慢） |
 | `--iou 0.7` | NMS 的 IoU 阈值，控制同一只鸟的重复框 |
 | `--all-classes` | 把非鸟目标也算作结果（默认只把鸟算结果；非鸟类别无论有没有这个开关都会列在「画面里还有」里） |
+| `--sharpness` | 顺带给每只鸟评清晰度（同图内相对量；等价于拿框去调 `whatbird sharpness`，见 §4.1.1） |
 
 > 默认只报鸟：预训练权重是 COCO 80 类，`bird` 是独立类别（id 14）。画面里的狗、人、车会被
 > 列在「画面里还有」里，用来解释「为什么有目标却没报鸟」。这条**必须靠模型把非鸟框也返回**才成立，
@@ -476,8 +519,8 @@ python -m whatbird.cli serve --port 8000
 | POST | `/api/batch/{job_id}/stop` | 批量：终止任务 |
 | POST | `/api/focus` | 上传单张 jpg 分析对焦点（纯本地算法） |
 | POST | `/api/focus-path` | 传入服务器上的 jpg 路径分析对焦点 |
-| POST | `/api/detect` | 上传单张 jpg 做鸟类位置检测（纯本地 YOLO；可选表单参数 `conf` / `imgsz` / `all_classes`） |
-| POST | `/api/detect-path` | 传入服务器上的 jpg 路径做鸟类位置检测（JSON 里同样可带上面三个参数） |
+| POST | `/api/detect` | 上传单张 jpg 做鸟类位置检测（纯本地 YOLO；可选表单参数 `conf` / `imgsz` / `all_classes` / `sharpness`） |
+| POST | `/api/detect-path` | 传入服务器上的 jpg 路径做鸟类位置检测（JSON 里同样可带上面四个参数） |
 | GET | `/docs` | 自动生成的 OpenAPI 文档 |
 
 > **`/api/focus*` 是纯本地算法**：不调用方舟、不消耗额度、不需要 API Key，
@@ -512,8 +555,11 @@ curl -X POST http://127.0.0.1:8000/api/recognize-path ^
 ### 网页上的鸟类位置检测
 
 页面最下方的「4 · 鸟类位置检测」卡片：同样选好图片（或填好路径）后点按钮即可，**不需要 API Key**、
-**不消耗额度**（纯本地 YOLO 推理）。结果区给出标注图 + 每个框的坐标/相对位置/置信度，
+**不消耗额度**（纯本地 YOLO 推理）。结果区给出标注图 + 每个框的坐标/相对位置/置信度/**清晰度**，
 以及「画面里的其他目标」（画面里有狗、人、车却没报鸟时，用它解释原因）。
+
+「清晰度」列就是 §4.1.1 的区域评分（页面固定请求 `sharpness=true`）：`IN FOCUS 100%` 这种
+短标签 + 相对全图最锐处的百分比，鼠标悬停可看完整中文结论；整张图偏软时会在「说明」里提示。
 
 它**只给位置、不给种类**：框出来的地方是不是鸟由 COCO 预训练权重判断，认种类请用上面的识别功能。
 首次使用需要一份权重（见第 2 节的下载脚本）；权重缺失、装不下、或没装 ultralytics 时，

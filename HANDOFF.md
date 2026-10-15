@@ -25,7 +25,12 @@
 
 交付面：`core` + CLI `whatbird focus` + Web `/api/focus`、`/api/focus-path` + 网页面板。**纯本地，不联网、不消耗额度。**
 
-**当前状态**：`266 passed, 10 skipped`。未提交 git。
+**当前状态**：`317 passed, 10 skipped`。区域清晰度评分（§6.1）**已实现**：
+`whatbird sharpness` / `detect --sharpness` / Web 的 `sharpness` 开关，见
+[`docs/focus-algorithm.md`](docs/focus-algorithm.md) §三。
+
+> 本机换了工作区：**`D:\whatBirds`**（原 `E:\WhatBird`），**没有 Intel 显卡**（CPU-only，
+> torch 2.14.1+cpu），环境与下面这张表略有出入，见 §1。
 
 **最要紧的事**：**OM-1 的 EXIF 对焦点已经被解出来了，但还差最后一步确认**——见 §5。用户正在装 exiftool，等他发 `exif-dump.txt`。
 
@@ -34,18 +39,24 @@
 ## 1. 环境与运行
 
 ```powershell
-cd E:\WhatBird
+cd D:\whatBirds
 .\.venv\Scripts\python.exe -m pytest                     # 全量
 .\.venv\Scripts\python.exe -m pytest tests/test_focus_*.py -q
 .\.venv\Scripts\python.exe -m whatbird.cli focus PA052644.JPG --overlay out.png
+.\.venv\Scripts\python.exe -m whatbird.cli sharpness PA052644.JPG --box 120,80,300,240
 .\.venv\Scripts\python.exe -m whatbird.cli serve --port 8123
 ```
 
-实测版本（不要凭猜改）：
+实测版本（**本机 D:\whatBirds 实测，不要凭猜改**）：
 
 ```
-Python 3.10.11 ｜ numpy 1.26.4 ｜ cv2 4.10.0 ｜ exifread 3.5.1 ｜ Pillow 11.3.0
+Python 3.10.2 ｜ numpy 2.2.6 ｜ cv2 5.0.0（GUI 版，见下）｜ exifread 3.5.1 ｜ Pillow 11.3.0
 ```
+
+> ⚠ 与 `requirements.txt` 不一致的两处（都是装 ultralytics 时漏了 `--no-deps` 造成）：
+> numpy 钉的是 1.26.4 但实际 2.2.6；`opencv-python`（GUI）与 headless 同时装着、
+> `import cv2` 实际加载 GUI 版。对焦与清晰度相关的测试在 numpy 2.2.6 下**全过**，
+> 但对齐办法与取舍写在 [`HANDOFF-detect.md`](HANDOFF-detect.md) §3 / §7-4。
 
 ---
 
@@ -293,22 +304,40 @@ PA052737   030A=[空, (296,213,48,54)]  030B=[空, 空, ..., 772]
 
 ## 6. 其他未完成线程
 
-### 6.1 「区域清晰程度」评分 API（用户已问过，未实现）
+### 6.1 ✅ 「区域清晰程度」评分 API —— **已实现**（本会话）
 
-用户问"能不能判断一个区域的清晰程度"。实测结论：
+用户问"能不能判断一个区域的清晰程度"。当时只有实测结论，现在落地成了：
 
-- ✅ **同一内容**比清晰：SML 单调，从清晰到糊有 **7 倍**动态范围（模糊 r=0→5 得 1.00→0.12）
-- ⚠️ **同图跨内容**比：**不行**。同样模糊量下，棋盘 169,596 vs 噪声 66,318（差 2.5 倍）
-- ⚠️ **内容相近**的区域比：可行。两只伯劳 13,135 vs 6,826（正好一只合焦一只失焦）
-- ❌ **跨照片绝对判定**：需要基准标定
+```python
+score_region_sharpness(source, box, *, params) -> RegionSharpness   # 单块
+score_regions(source, boxes, *, params) -> RegionScoreReport        # 多块，只建一次图
+```
+
+CLI：`whatbird sharpness <图> --box x,y,w,h [--box-ratio …] [--overlay out.png]`；
+与检测打通：`whatbird detect <图> --sharpness`（逐只鸟评）、Web `/api/detect` 的 `sharpness` 开关
+（页面第 4 个卡片多了「清晰度」列）。
+算法、参数、实测数据在 [`docs/focus-algorithm.md`](docs/focus-algorithm.md) §三。
+
+**现状的实测依据（都进了回归测试）**：
+
+- ✅ 同一内容比清晰：SML 单调，逐级模糊 41662 → 1539（27 倍动态范围）；
+- ⚠️ 同图跨内容比绝对锐度：**不行**（棋盘格 13847 vs 噪声 4518，3.06 倍）→ 所以只报相对量；
+- ❌ 跨照片绝对判定：需要基准标定 → 明确不做；
+- ✅ 两个"测不出来"的情况被分开：框内无细节（纹理 σ，纯色 ≈1.1 vs 有内容 ≈5.6）→"无法判断"；
+  全图峰值/中位数太小（判据与 `min_confidence` 共用）→"没有唯一锐处"；
+- ✅ 真实鸟片：两张翠鸟的检测框都判"合焦"（画面最锐处就在框内，top_share 96~100%）。
+
+**过程中推翻的两个设计（别改回去）**：
+
+1. 一开始把"框内 p75 ÷ 全图单点峰值"当主指标 → 合焦的翠鸟只得到 42%、被判"可能轻微失焦"，
+   而且逐级模糊时该比值反而**上升**。根因是两个量不可比（区域稳健分位数 vs 单窗口极大值）。
+   现在一律同量纲比："框内最锐处 ÷ 全图最锐处" + "全图最锐 1% 像素落在框内的占比"。
+2. 聚合窗口原本固定用短边的 8%（那是给全图找焦点调的）→ 150×120 的小框只有 1.9 个窗口宽，
+   被误判成"不可靠"。现在**按框大小自适应选窗口**，并且全图参照用同一个窗口重算。
 
 试过并**否决**的无参考模糊度量（别重走）：
 - Crete 比率：同模糊不同内容 0.837 vs 0.497（方向都反了）；渐进模糊下只从 0.761 挤到 0.989
 - 边缘宽度：7.25 → 9.00，基本不动
-
-**建议形态**：`score_region_sharpness(image, box) -> {score, percentile, relative_to_best, verdict}`，
-配合检测模块 → 回答"框出的这只鸟锐不锐"。
-**坑**：聚合窗口必须**远小于**区域，否则相邻锐利内容会把分数抬起来（§4.3 踩过）。
 
 ### 6.2 内容分析在满纹理画面里判别力弱（已知边界，非 bug）
 
@@ -430,7 +459,7 @@ OM-1 / 300mm f/6.7 / 5184×3888
 - [ ] 收到 `exif-dump.txt` → 定死 `0x030A` / `0x030B` / `FocusInfo 0x0305` 语义（§5.5）
 - [ ] 实现 OM System 层 + 回归用例（含 PA052644 必须命中的断言）（§5.6）
 - [ ] 把三张样张放进 `samples/`（§6.3）
-- [ ] 决定要不要做 `score_region_sharpness()`（§6.1）
+- [x] 决定要不要做 `score_region_sharpness()`（§6.1）→ **已做**（含 CLI / detect 打通 / Web 列 / 文档）
 - [ ] 与另一个会话确认 `image_input.py` / `core/__init__.py` / `overlay.py` 的合并（§8）
 - [ ] `docs/focus-algorithm.md` 与实现保持同步（**改算法必须改文档**）
 - [ ] 决定是否提交 git（目前全部未提交）

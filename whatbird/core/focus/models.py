@@ -84,6 +84,35 @@ class FocusParams:
     contrast_ref: float = 10.0
     """峰值 / 中位数 达到该值时，内容分析置信度记 1.0。"""
 
+    region_quantile: float = 0.75
+    """区域评分取框内清晰度图的哪个分位数当"这块区域有多锐"（默认 0.75）。
+
+    不用均值：框住一只鸟时，框里难免带上一点背景（树枝、天空），均值会被背景稀释；
+    也不用最大值：那只是一个像素的窗口和，容易被偶发的锐点（一根细枝、一个噪点边缘）抬高。
+    p75 是"这块区域里普遍有多锐"的稳健代表，实测在合成样本与真实鸟片上都能分开
+    "合焦的鸟"与"失焦的鸟"。
+    """
+
+    min_region_texture: float = 3.0
+    """框内灰度标准差低于该值，就认为"这个区域没有可测的细节"。
+
+    天空、纯色背景、完全虚化的水面这类区域，清晰度值恒接近 0 —— **无论合焦与否都测不出
+    清晰度**。此时必须明说"无法判断"，而不是报一个"很糊"的分数（那是把"没内容"
+    误读成"没对上焦"）。
+
+    3.0 是实测定的：纯色/天空区域 σ ≈ 1.1（含 JPEG 块噪声），**同样模糊量下有内容的
+    区域 σ ≈ 5.6**（模糊的噪声），而合焦的鸟 σ ≈ 36~48。阈值必须落在 1.1 与 5.6 之间，
+    取 3.0 给"纯色但带压缩噪声"留余量，又不至于把"软但仍有很多细节"的区域误判成没内容。
+    """
+
+    min_region_windows: float = 2.0
+    """框的短边至少要等于几个聚合窗口，否则分数标为"不可靠"。
+
+    聚合窗口本身就有边长，窗口内的内容会被算进这个框的分数 —— 框越小，窗口"越界"
+    带进来的相邻内容越多（§4.3 踩过这个坑）。默认 2 个窗口对应一条很好记的判据：
+    **框的短边至少要有画面短边的 16%**（窗口 ≈ 短边 × `aggregate_ratio` = 8%）。
+    """
+
     min_confidence: float = 0.45
     """低于该置信度就认为"没有可信的对焦点"，``found`` 置 False。
 
@@ -108,7 +137,11 @@ class FocusParams:
             "peak_ratio": self.peak_ratio,
             "top_n": self.top_n,
             "max_region_for_centroid": self.max_region_for_centroid,
-            "max_centroid_offset": self.max_centroid_offset,            "contrast_ref": self.contrast_ref,
+            "max_centroid_offset": self.max_centroid_offset,
+            "contrast_ref": self.contrast_ref,
+            "region_quantile": self.region_quantile,
+            "min_region_texture": self.min_region_texture,
+            "min_region_windows": self.min_region_windows,
             "min_confidence": self.min_confidence,
             "use_exif": self.use_exif,
             "use_content": self.use_content,
@@ -173,6 +206,226 @@ class FocusRegion:
             "area_ratio": round(self.area_ratio, 4),
             "centroid_x": self.centroid_x,
             "centroid_y": self.centroid_y,
+        }
+
+
+@dataclass(slots=True)
+class RegionBox:
+    """要评估的一块矩形区域（``x``/``y``/``width``/``height``，与原图同口径）。
+
+    构造时请留意坐标语义：这里的 ``width``/``height`` 是**宽高**，不是右下角坐标。
+    从检测框（``Detection.box`` 是 ``xyxy``）转过来用 :meth:`from_xyxy`，
+    从 0~1 相对坐标转过来用 :meth:`from_ratios`。
+    """
+
+    x: int
+    y: int
+    width: int
+    height: int
+
+    @classmethod
+    def from_xyxy(cls, x1: float, y1: float, x2: float, y2: float) -> "RegionBox":
+        """从 ``xyxy``（左上 + 右下）构造 —— 检测框就是这个口径。"""
+        left, top = int(round(min(x1, x2))), int(round(min(y1, y2)))
+        right, bottom = int(round(max(x1, x2))), int(round(max(y1, y2)))
+        return cls(x=left, y=top, width=max(right - left, 1), height=max(bottom - top, 1))
+
+    @classmethod
+    def from_ratios(
+        cls,
+        x_ratio: float,
+        y_ratio: float,
+        width_ratio: float,
+        height_ratio: float,
+        *,
+        image_width: int,
+        image_height: int,
+    ) -> "RegionBox":
+        """从 0~1 相对坐标构造（前端在缩略图上框选时用这个）。"""
+        return cls.from_xyxy(
+            x_ratio * image_width,
+            y_ratio * image_height,
+            (x_ratio + width_ratio) * image_width,
+            (y_ratio + height_ratio) * image_height,
+        )
+
+    @property
+    def xyxy(self) -> tuple[int, int, int, int]:
+        return self.x, self.y, self.x + self.width, self.y + self.height
+
+    @property
+    def area(self) -> int:
+        return self.width * self.height
+
+    def clamped(self, *, image_width: int, image_height: int) -> "RegionBox":
+        """钳进画面内（框可以越界，但越界的部分没有像素可评）。"""
+        left = min(max(self.x, 0), max(image_width - 1, 0))
+        top = min(max(self.y, 0), max(image_height - 1, 0))
+        right = min(max(self.x + self.width, left + 1), image_width)
+        bottom = min(max(self.y + self.height, top + 1), image_height)
+        return RegionBox(x=left, y=top, width=right - left, height=bottom - top)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+        }
+
+
+@dataclass(slots=True)
+class RegionSharpness:
+    """一块区域的清晰度评分 —— **全部是相对量，只在同一张图内部有意义**。
+
+    跨照片比较需要基准标定，本工具刻意不做（详见 ``docs/focus-algorithm.md``）。
+    """
+
+    box: RegionBox
+    x_ratio: float = 0.0
+    y_ratio: float = 0.0
+    width_ratio: float = 0.0
+    height_ratio: float = 0.0
+
+    sharpness: float = 0.0
+    """框内清晰度图的 ``region_quantile`` 分位数（默认 p75）—— 这块区域"普遍有多锐"。"""
+
+    peak: float = 0.0
+    """框内最锐的那个像素（窗口求和值，仍是绝对量）。"""
+
+    frame_median: float = 0.0
+    frame_peak: float = 0.0
+    relative_to_frame_peak: float = 0.0
+    """框内**最锐处** ÷ 全图最锐处 —— 主指标。**1.0 表示全图最锐的点就在这个框里**。
+
+    刻意用"最锐处 ÷ 最锐处"而不是"框内分位数 ÷ 全图峰值"：后者是两个不可比的量
+    （一块区域的稳健分位数 vs 单个窗口的极大值），实测会把**合焦的鸟**判成"只有最锐处的
+    42%、可能轻微失焦"，而且逐级模糊时该比值还会反向上升（模糊先抹掉全图峰值，
+    框内分位数反而相对抬起来）。同量纲相比才有意义。
+    """
+
+    top_share: float = 0.0
+    """全图最锐的那 1% 像素里，有多少比例落在这个框内。
+
+    "最高只到峰值的 9X%" 在峰值是**一个孤立噪点**时会误判；这个占比回答的是
+    "画面里那一片最锐的东西是不是就在框里"，比单点比较稳。
+    """
+
+    frame_contrast: float = 0.0
+    """全图峰值 ÷ 全图中位数。太小说明整张图清晰度都差不多（全图合焦或全图失焦）。"""
+
+    frame_has_peak: bool = True
+    """全图是否存在"明显的唯一锐处"。
+
+    为 False 时 :attr:`relative_to_frame_peak` 的参照本身不成立（一张整片树叶都在焦内的
+    照片就是这种），结论必须退回到百分位，并且明说不能据此判断是否合焦。
+    判据与对焦分析共用同一套标定：``min_confidence`` / ``contrast_ref``。
+    """
+
+    percentile: float = 0.0
+    """框内锐度落在全图清晰度分布的哪个百分位。"""
+
+    texture: float = 0.0
+    """框内灰度标准差：判断"这个区域有没有细节可测"（天空/虚化背景接近 0）。"""
+
+    verdict: str = ""
+    """一句可直接展示的中文结论。"""
+
+    detail: str = ""
+    """数字细节（锐度、相对值、百分位、纹理、采样像素数）。"""
+
+    reliable: bool = True
+    """框是否足够大（短边 ≥ ``min_region_windows`` 个聚合窗口）；False 时分数仅供参考。"""
+
+    low_detail: bool = False
+    """框里几乎没有可测细节：此时"清晰度"本身无从谈起，结论必须是"无法判断"。"""
+
+    sampled_pixels: int = 0
+    """框在分析尺度下覆盖了多少像素（给"框太小"这类判断提供依据）。"""
+
+    window: int = 0
+    """这一块评分时用的聚合窗口边长（分析尺度像素）。
+
+    按框的大小自适应：窗口必须远小于被测区域，否则框外相邻内容会被算进来。
+    大框用默认窗口；小框会自动换更小的窗口（于是全图参照也跟着换成同一窗口下的统计量，
+    保证"框 vs 全图"始终同量纲）。
+    """
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "box": self.box.to_dict(),
+            "x_ratio": self.x_ratio,
+            "y_ratio": self.y_ratio,
+            "width_ratio": self.width_ratio,
+            "height_ratio": self.height_ratio,
+            "sharpness": round(self.sharpness, 3),
+            "peak": round(self.peak, 3),
+            "frame_median": round(self.frame_median, 3),
+            "frame_peak": round(self.frame_peak, 3),
+            "frame_contrast": round(self.frame_contrast, 3),
+            "frame_has_peak": self.frame_has_peak,
+            "relative_to_frame_peak": round(self.relative_to_frame_peak, 4),
+            "top_share": round(self.top_share, 4),
+            "percentile": round(self.percentile, 4),
+            "texture": round(self.texture, 3),
+            "verdict": self.verdict,
+            "detail": self.detail,
+            "reliable": self.reliable,
+            "low_detail": self.low_detail,
+            "sampled_pixels": self.sampled_pixels,
+            "window": self.window,
+        }
+
+
+@dataclass(slots=True)
+class RegionScoreReport:
+    """一次「区域清晰度评分」的完整结果（CLI 与 Web 共用的对外结构）。"""
+
+    source_image: str = ""
+    width: int = 0
+    height: int = 0
+    analyzed_width: int = 0
+    analyzed_height: int = 0
+    scale: float = 1.0
+    window: int = 0
+    metric: str = METRIC_SML
+    frame_median: float = 0.0
+    frame_peak: float = 0.0
+    frame_contrast: float = 0.0
+    frame_has_peak: bool = True
+    regions: list[RegionSharpness] = field(default_factory=list)
+    elapsed_seconds: float = 0.0
+    notes: list[str] = field(default_factory=list)
+    params: dict[str, Any] = field(default_factory=dict)
+
+    def top(self) -> RegionSharpness | None:
+        """最锐的那一块（列表顺序与传入顺序一致，这里按分数选）。"""
+        if not self.regions:
+            return None
+        return max(self.regions, key=lambda item: item.sharpness)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_image": self.source_image,
+            "image": {
+                "width": self.width,
+                "height": self.height,
+                "analyzed_width": self.analyzed_width,
+                "analyzed_height": self.analyzed_height,
+                "scale": round(self.scale, 6),
+                "window": self.window,
+            },
+            "metric": self.metric,
+            "frame": {
+                "median": round(self.frame_median, 3),
+                "peak": round(self.frame_peak, 3),
+                "contrast": round(self.frame_contrast, 3),
+                "has_peak": self.frame_has_peak,
+            },
+            "regions": [item.to_dict() for item in self.regions],
+            "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "notes": list(self.notes),
+            "params": dict(self.params),
         }
 
 
